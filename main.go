@@ -265,18 +265,25 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.commitWithSuggestion()
 		}
 		return m, nil
-	default:
-		var cmd tea.Cmd
-		switch m.currentPage {
-		case "changes":
-			m.changesTable, cmd = m.changesTable.Update(msg)
-		case "suggestions":
-			m.suggestionsTable, cmd = m.suggestionsTable.Update(msg)
-		case "history":
-			m.historyTable, cmd = m.historyTable.Update(msg)
-		}
-		return m, cmd
+	case "a":
+		return m, m.gitAddAll()
+	case "p":
+		return m, m.gitPush()
+	case "s":
+		return m, m.gitStatus()
 	}
+
+	// Let table handle all other keys (including arrows, j/k, mouse)
+	var cmd tea.Cmd
+	switch m.currentPage {
+	case "changes":
+		m.changesTable, cmd = m.changesTable.Update(msg)
+	case "suggestions":
+		m.suggestionsTable, cmd = m.suggestionsTable.Update(msg)
+	case "history":
+		m.historyTable, cmd = m.historyTable.Update(msg)
+	}
+	return m, cmd
 }
 
 func (m model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -470,6 +477,56 @@ func (m model) commitWithSuggestion() tea.Cmd {
 	}
 }
 
+func (m model) gitAddAll() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "add", ".")
+		cmd.Dir = m.repoPath
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Git add failed: %v - %s", err, string(output))}
+		}
+
+		return statusMsg{message: "✅ All changes staged (git add .)"}
+	}
+}
+
+func (m model) gitPush() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "push")
+		cmd.Dir = m.repoPath
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Git push failed: %v - %s", err, string(output))}
+		}
+
+		return statusMsg{message: "✅ Pushed to remote repository"}
+	}
+}
+
+func (m model) gitStatus() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "status", "--short")
+		cmd.Dir = m.repoPath
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Git status failed: %v", err)}
+		}
+
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if len(lines) == 1 && lines[0] == "" {
+			return statusMsg{message: "✅ Working tree clean"}
+		}
+
+		return statusMsg{message: fmt.Sprintf("📊 %d files modified", len(lines))}
+	}
+}
+
 func (m model) View() string {
 	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).
 		Render("🔄 Git Commit Message Generator")
@@ -494,16 +551,16 @@ func (m model) View() string {
 			footer = fmt.Sprintf("Editing %s: %s | tab: next • enter: save • esc: cancel",
 				colNames[m.editCol], m.textInput.View())
 		} else {
-			footer = "1-3: switch page • ↑↓: navigate • e: edit • r: refresh • q: quit"
+			footer = "1-3: pages • ↑↓/jk: navigate • e: edit • a: git add • r: refresh • q: quit"
 		}
 
 	case "suggestions":
 		tableView = m.suggestionsTable.View()
-		footer = "1-3: switch page • ↑↓: navigate • c/enter: commit • g: regenerate • q: quit"
+		footer = "1-3: pages • ↑↓/jk: navigate • c/enter: commit • a: git add • p: git push • g: regenerate • q: quit"
 
 	case "history":
 		tableView = m.historyTable.View()
-		footer = "1-3: switch page • ↑↓: navigate • q: quit"
+		footer = "1-3: pages • ↑↓/jk: navigate • s: git status • a: git add • p: git push • q: quit"
 	}
 
 	var statusMessage string
