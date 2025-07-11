@@ -5,7 +5,8 @@ A simple, user-friendly terminal UI for creating git commits with smart suggesti
 ## ✨ Features
 
 - **Simple Interface**: Clean, intuitive design with three main modes
-- **Smart Suggestions**: Automatically analyzes your changes and suggests commit messages
+- **Smart Suggestions**: Analyzes git diffs, file content, and patterns to suggest contextual commit messages
+- **Function Detection**: Recognizes when you add/modify functions and suggests specific messages
 - **Quick Actions**: One-key shortcuts for common git operations
 - **Custom Messages**: Easy custom commit message input
 
@@ -18,10 +19,14 @@ A simple, user-friendly terminal UI for creating git commits with smart suggesti
    - See what's been modified, added, or deleted
    - Quick overview of your working directory
 
-2. **💡 Suggestions Mode** (`2` key) 
-   - AI-powered commit message suggestions
-   - Based on your file changes and conventional commit standards
+2. **💡 Suggestions Mode** (`2` key)
+   - **Combined suggestion** as the first option - intelligently merges all your changes
+   - Individual file-specific suggestions based on actual code changes
+   - Analyzes git diffs, detects function additions/modifications
+   - Groups related changes for comprehensive commits
+   - Follows conventional commit standards (feat, fix, docs, etc.)
    - Press `Enter` to commit with a suggestion
+   - Press `e` to **edit any suggestion** before committing
 
 3. **✏️ Custom Mode** (`3` key)
    - Write your own commit message
@@ -39,7 +44,8 @@ A simple, user-friendly terminal UI for creating git commits with smart suggesti
 - `1`, `2`, `3` - Switch between modes
 - `↑`/`↓` or `j`/`k` - Navigate lists
 - `Enter` - Commit selected suggestion or custom message
-- `Esc` - Cancel custom input
+- `e` - Edit selected suggestion (in suggestions mode)
+- `Esc` - Cancel custom input or go back
 
 ## 🎨 Visual Design
 
@@ -59,4 +65,30 @@ The interface maintains a clean, modern look with:
 6. Optionally push with `p`
 
 Simple as that! No complex navigation or confusing options.
-asdf
+
+## 📦 Installation
+
+### Global Installation
+
+1. Build the application:
+   ```bash
+   go build -o commit-helper .
+   ```
+
+2. Install to your local bin directory:
+   ```bash
+   cp commit-helper ~/.local/bin/
+   ```
+
+3. Make sure `~/.local/bin` is in your PATH (add to your shell config if needed):
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
+
+4. Now you can use `commit-helper` from any git repository!
+
+### Usage
+Simply run from any git repository:
+```bash
+commit-helper
+```
