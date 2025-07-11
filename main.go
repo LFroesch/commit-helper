@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -83,14 +85,6 @@ var (
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
 			MarginTop(1)
-
-	statusStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("86")).
-			Bold(true)
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196")).
-			Bold(true)
 )
 
 func main() {
@@ -151,7 +145,18 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		tea.SetWindowTitle("Git Commit Helper"),
 		m.loadGitChanges(),
+		m.checkHookStatusOnStartup(),
 	)
+}
+
+func (m model) checkHookStatusOnStartup() tea.Cmd {
+	return func() tea.Msg {
+		hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
+		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
+			return statusMsg{message: "💡 Tip: Press 'h' to install commit message validation hook"}
+		}
+		return statusMsg{message: "🔒 Commit validation hook is active"}
+	}
 }
 
 func (m model) loadGitChanges() tea.Cmd {
@@ -224,74 +229,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-
-		case "1":
-			m.state = "files"
-			return m, nil
-
-		case "2":
-			if len(m.suggestions) > 0 {
-				m.state = "suggestions"
-			}
-			return m, nil
-
-		case "3":
-			m.state = "custom"
-			m.customInput.Focus()
-			return m, nil
-
-		case "e":
-			if m.state == "suggestions" && len(m.suggestions) > 0 {
-				selected := m.suggestionsList.SelectedItem()
-				if suggestion, ok := selected.(CommitSuggestion); ok {
-					m.state = "edit"
-					m.editInput.SetValue(suggestion.Message)
-					m.editInput.Focus()
-				}
-			}
-			return m, nil
-
-		case "r":
-			return m, tea.Batch(
-				m.loadGitChanges(),
-				func() tea.Msg {
-					return statusMsg{message: "🔄 Refreshing..."}
-				},
-			)
-
-		case "a":
-			return m, m.gitAddAll()
-
-		case "p":
-			return m, m.gitPush()
-
-		case "s":
-			return m, m.gitStatus()
-
-		case "enter":
-			switch m.state {
-			case "suggestions":
-				if len(m.suggestions) > 0 {
-					selected := m.suggestionsList.SelectedItem()
-					if suggestion, ok := selected.(CommitSuggestion); ok {
-						return m, m.commitWithMessage(suggestion.Message)
-					}
-				}
-			case "custom":
-				if m.customInput.Value() != "" {
-					return m, m.commitWithMessage(m.customInput.Value())
-				}
-			case "edit":
-				if m.editInput.Value() != "" {
-					return m, m.commitWithMessage(m.editInput.Value())
-				}
-			}
-			return m, nil
-
-		case "esc":
+		// Handle escape first for all states
+		if msg.String() == "esc" {
 			if m.state == "custom" {
 				m.customInput.Blur()
 				m.customInput.SetValue("")
@@ -302,6 +241,114 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = "suggestions"
 			}
 			return m, nil
+		}
+
+		// Handle enter for input states
+		if msg.String() == "enter" {
+			switch m.state {
+			case "suggestions":
+				if len(m.suggestions) > 0 {
+					selected := m.suggestionsList.SelectedItem()
+					if suggestion, ok := selected.(CommitSuggestion); ok {
+						return m, m.commitWithMessage(suggestion.Message)
+					}
+				}
+			case "custom":
+				if m.customInput.Value() != "" {
+					msg := m.customInput.Value()
+					if !m.validateCommitMessage(msg) {
+						// Show warning but still allow commit
+						return m, tea.Batch(
+							m.commitWithMessage(msg),
+							func() tea.Msg {
+								return statusMsg{message: "⚠️ Commit message doesn't follow conventional format"}
+							},
+						)
+					}
+					return m, m.commitWithMessage(msg)
+				}
+			case "edit":
+				if m.editInput.Value() != "" {
+					msg := m.editInput.Value()
+					if !m.validateCommitMessage(msg) {
+						// Show warning but still allow commit
+						return m, tea.Batch(
+							m.commitWithMessage(msg),
+							func() tea.Msg {
+								return statusMsg{message: "⚠️ Commit message doesn't follow conventional format"}
+							},
+						)
+					}
+					return m, m.commitWithMessage(msg)
+				}
+			}
+			return m, nil
+		}
+
+		// Only handle other keys if NOT in text input mode
+		if m.state != "custom" && m.state != "edit" {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "1":
+				m.state = "files"
+				return m, nil
+
+			case "2":
+				if len(m.suggestions) > 0 {
+					m.state = "suggestions"
+				}
+				return m, nil
+
+			case "3":
+				m.state = "custom"
+				m.customInput.Focus()
+				return m, nil
+
+			case "e":
+				if m.state == "suggestions" && len(m.suggestions) > 0 {
+					selected := m.suggestionsList.SelectedItem()
+					if suggestion, ok := selected.(CommitSuggestion); ok {
+						m.state = "edit"
+						m.editInput.SetValue(suggestion.Message)
+						m.editInput.Focus()
+					}
+				}
+				return m, nil
+
+			case "r":
+				return m, tea.Batch(
+					m.loadGitChanges(),
+					func() tea.Msg {
+						return statusMsg{message: "🔄 Refreshing..."}
+					},
+				)
+
+			case "a":
+				return m, m.gitAddAll()
+
+			case "p":
+				return m, m.gitPush()
+
+			case "s":
+				return m, m.gitStatus()
+
+			case "h":
+				return m, m.generateCommitHook()
+
+			case "H":
+				return m, m.removeCommitHook()
+
+			case "i":
+				return m, m.checkHookStatus()
+
+			case "?":
+				// Show help about the commit hook
+				return m, func() tea.Msg {
+					return statusMsg{message: "📋 h: install hook • H: remove hook • i: hook info • ?: help"}
+				}
+			}
 		}
 	}
 
@@ -325,7 +372,15 @@ func (m model) View() string {
 
 	// Header
 	header := titleStyle.Render("🚀 Git Commit Helper")
-	repoInfo := helpStyle.Render(fmt.Sprintf("Repository: %s", filepath.Base(m.repoPath)))
+	
+	// Check hook status for display
+	hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
+	hookStatus := ""
+	if _, err := os.Stat(hookPath); err == nil {
+		hookStatus = " 🔒"
+	}
+	
+	repoInfo := helpStyle.Render(fmt.Sprintf("Repository: %s%s", filepath.Base(m.repoPath), hookStatus))
 
 	// Navigation tabs
 	tabs := lipgloss.JoinHorizontal(
@@ -374,13 +429,13 @@ func (m model) View() string {
 	var footer string
 	switch m.state {
 	case "files":
-		footer = "1-3: switch mode • ↑↓: navigate • r: refresh • a: git add • s: status • q: quit"
+		footer = "1-3: switch • ↑↓: navigate • r: refresh • a: add • s: status • h: install hook • H: remove hook • i: hook info • ?: help • q: quit"
 	case "suggestions":
-		footer = "1-3: switch mode • ↑↓: navigate • enter: commit • e: edit • a: git add • p: push • q: quit"
+		footer = "1-3: switch • ↑↓: navigate • enter: commit • e: edit • a: add • p: push • h: install hook • H: remove hook • i: hook info • ?: help • q: quit"
 	case "custom":
-		footer = "1-3: switch mode • enter: commit • esc: cancel • a: git add • p: push • q: quit"
+		footer = "enter: commit • esc: cancel • (other keys disabled while typing)"
 	case "edit":
-		footer = "enter: commit • esc: back to suggestions • a: git add • p: push • q: quit"
+		footer = "enter: commit • esc: back to suggestions • (other keys disabled while typing)"
 	}
 
 	// Add status message if present
@@ -426,6 +481,18 @@ func (m model) renderTab(key, label string, active bool) string {
 
 func (m model) gitAddAll() tea.Cmd {
 	return func() tea.Msg {
+		// Check if there are any changes to stage
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = m.repoPath
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
+		}
+		
+		if len(strings.TrimSpace(string(statusOutput))) == 0 {
+			return statusMsg{message: "ℹ️ No changes to stage"}
+		}
+
 		cmd := exec.Command("git", "add", ".")
 		cmd.Dir = m.repoPath
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
@@ -441,6 +508,19 @@ func (m model) gitAddAll() tea.Cmd {
 
 func (m model) gitPush() tea.Cmd {
 	return func() tea.Msg {
+		// Check if there are commits to push
+		statusCmd := exec.Command("git", "status", "--porcelain=v1", "--branch")
+		statusCmd.Dir = m.repoPath
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
+		}
+		
+		statusStr := string(statusOutput)
+		if !strings.Contains(statusStr, "ahead") {
+			return statusMsg{message: "ℹ️ No commits to push"}
+		}
+
 		cmd := exec.Command("git", "push")
 		cmd.Dir = m.repoPath
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
@@ -477,6 +557,18 @@ func (m model) gitStatus() tea.Cmd {
 // Git operation functions
 func (m model) commitWithMessage(message string) tea.Cmd {
 	return func() tea.Msg {
+		// Check if there are staged changes
+		statusCmd := exec.Command("git", "diff", "--cached", "--name-only")
+		statusCmd.Dir = m.repoPath
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to check staged changes: %v", err)}
+		}
+		
+		if len(strings.TrimSpace(string(statusOutput))) == 0 {
+			return statusMsg{message: "❌ No staged changes to commit. Use 'a' to stage files first."}
+		}
+
 		cmd := exec.Command("git", "commit", "-m", message)
 		cmd.Dir = m.repoPath
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
@@ -568,51 +660,78 @@ func generateCombinedSuggestion(individual []CommitSuggestion, grouped []CommitS
 
 	// Count types to determine the main focus
 	typeCounts := make(map[string]int)
+	scopeCounts := make(map[string]int)
+	
 	for _, suggestion := range individual {
 		typeCounts[suggestion.Type]++
+		// Extract scope from message if formatted conventionally
+		if strings.Contains(suggestion.Message, "(") && strings.Contains(suggestion.Message, "):") {
+			start := strings.Index(suggestion.Message, "(") + 1
+			end := strings.Index(suggestion.Message, "):")
+			if end > start {
+				scope := suggestion.Message[start:end]
+				scopeCounts[scope]++
+			}
+		}
 	}
 
-	// Find the most common type
-	var mainType string
-	maxCount := 0
+	// Find the most common type and scope
+	var mainType, mainScope string
+	maxTypeCount := 0
 	for commitType, count := range typeCounts {
-		if count > maxCount {
-			maxCount = count
+		if count > maxTypeCount {
+			maxTypeCount = count
 			mainType = commitType
+		}
+	}
+	
+	maxScopeCount := 0
+	for scope, count := range scopeCounts {
+		if count > maxScopeCount {
+			maxScopeCount = count
+			mainScope = scope
 		}
 	}
 
 	// Generate a simple combined message
-	var message string
+	var description string
 	totalFiles := len(individual)
 
 	if len(typeCounts) == 1 {
 		// All changes are the same type - keep it simple
 		switch mainType {
 		case "feat":
-			message = "add features"
+			description = "add features"
 		case "fix":
-			message = "fix issues"
+			description = "fix issues"
 		case "docs":
-			message = "update docs"
+			description = "update docs"
 		case "test":
-			message = "update tests"
+			description = "update tests"
 		case "chore":
-			message = "update config"
+			description = "update config"
 		case "refactor":
-			message = "refactor code"
+			description = "refactor code"
 		default:
-			message = "update files"
+			description = "update files"
 		}
 	} else {
 		// Mixed types - just use "update" for simplicity
-		message = "update multiple files"
+		description = "update multiple files"
 	}
 
 	// Only add file count if more than 1 file
 	if totalFiles > 1 {
-		message = fmt.Sprintf("%s (%d files)", message, totalFiles)
+		description = fmt.Sprintf("%s (%d files)", description, totalFiles)
 	}
+
+	// Use the main scope if it represents majority of changes
+	finalScope := ""
+	if maxScopeCount > totalFiles/2 {
+		finalScope = mainScope
+	}
+
+	message := formatConventionalCommit(mainType, finalScope, description)
 
 	return CommitSuggestion{
 		Type:    mainType,
@@ -655,23 +774,29 @@ func parseDiffOutput(diff string) DiffInfo {
 		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
 			info.LinesAdded++
 
-			// Detect function definitions (basic patterns for common languages)
-			if strings.Contains(line, "func ") ||
-				strings.Contains(line, "function ") ||
-				strings.Contains(line, "def ") ||
-				strings.Contains(line, "class ") {
-				// Extract function name
-				funcName := extractFunctionName(line)
-				if funcName != "" {
-					info.Functions = append(info.Functions, funcName)
+			// Detect function definitions (enhanced patterns for multiple languages)
+			funcName := extractFunctionName(line)
+			if funcName != "" && !contains(info.Functions, funcName) {
+				info.Functions = append(info.Functions, funcName)
+			}
+
+			// Detect imports/includes
+			if isImportLine(line) {
+				importName := extractImportName(line)
+				if importName != "" && !contains(info.Imports, importName) {
+					info.Imports = append(info.Imports, importName)
 				}
 			}
 
-			// Detect imports
-			if strings.Contains(line, "import ") ||
-				strings.Contains(line, "#include") ||
-				strings.Contains(line, "from ") {
-				info.Imports = append(info.Imports, strings.TrimSpace(line))
+			// Detect test-related content
+			if strings.Contains(strings.ToLower(line), "test") {
+				info.HasTests = true
+			}
+
+			// Detect documentation
+			if strings.Contains(line, "//") || strings.Contains(line, "/*") || 
+			   strings.Contains(line, "/**") || strings.Contains(line, "#") {
+				info.HasDocs = true
 			}
 		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
 			info.LinesRemoved++
@@ -681,10 +806,99 @@ func parseDiffOutput(diff string) DiffInfo {
 	return info
 }
 
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+func isImportLine(line string) bool {
+	trimmed := strings.TrimSpace(line[1:]) // Remove the + prefix
+	return strings.HasPrefix(trimmed, "import ") ||
+		   strings.HasPrefix(trimmed, "from ") ||
+		   strings.HasPrefix(trimmed, "#include") ||
+		   strings.HasPrefix(trimmed, "require(") ||
+		   strings.HasPrefix(trimmed, "const ") && strings.Contains(trimmed, "require(") ||
+		   strings.HasPrefix(trimmed, "use ")
+}
+
+func extractImportName(line string) string {
+	trimmed := strings.TrimSpace(line[1:]) // Remove the + prefix
+	
+	// Go imports
+	if strings.HasPrefix(trimmed, "import ") {
+		parts := strings.Fields(trimmed)
+		if len(parts) >= 2 {
+			importPath := strings.Trim(parts[len(parts)-1], "\"")
+			if strings.Contains(importPath, "/") {
+				parts := strings.Split(importPath, "/")
+				return parts[len(parts)-1]
+			}
+			return importPath
+		}
+	}
+	
+	// Python imports
+	if strings.HasPrefix(trimmed, "from ") {
+		parts := strings.Fields(trimmed)
+		if len(parts) >= 2 {
+			return parts[1]
+		}
+	}
+	
+	// JavaScript/Node requires
+	if strings.Contains(trimmed, "require(") {
+		start := strings.Index(trimmed, "require(") + 8
+		end := strings.Index(trimmed[start:], ")")
+		if end > 0 {
+			pkg := strings.Trim(trimmed[start:start+end], "\"'")
+			if strings.Contains(pkg, "/") {
+				parts := strings.Split(pkg, "/")
+				return parts[len(parts)-1]
+			}
+			return pkg
+		}
+	}
+	
+	return ""
+}
+
 func extractFunctionName(line string) string {
-	// Simple function name extraction for Go
-	if idx := strings.Index(line, "func "); idx != -1 {
-		parts := strings.Fields(line[idx:])
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "+") {
+		trimmed = strings.TrimSpace(trimmed[1:])
+	}
+
+	// Go function detection
+	if strings.Contains(trimmed, "func ") {
+		idx := strings.Index(trimmed, "func ")
+		remaining := trimmed[idx+5:]
+		
+		// Handle receiver methods like "func (r *Receiver) Method("
+		if strings.HasPrefix(remaining, "(") {
+			parenEnd := strings.Index(remaining, ")")
+			if parenEnd > 0 {
+				remaining = strings.TrimSpace(remaining[parenEnd+1:])
+			}
+		}
+		
+		parts := strings.Fields(remaining)
+		if len(parts) > 0 {
+			name := parts[0]
+			if parenIdx := strings.Index(name, "("); parenIdx != -1 {
+				name = name[:parenIdx]
+			}
+			return name
+		}
+	}
+
+	// JavaScript/TypeScript function detection
+	if strings.Contains(trimmed, "function ") {
+		idx := strings.Index(trimmed, "function ")
+		parts := strings.Fields(trimmed[idx:])
 		if len(parts) > 1 {
 			name := parts[1]
 			if parenIdx := strings.Index(name, "("); parenIdx != -1 {
@@ -694,18 +908,68 @@ func extractFunctionName(line string) string {
 		}
 	}
 
-	// Check for other languages
-	if idx := strings.Index(line, "function "); idx != -1 {
-		parts := strings.Fields(line[idx:])
-		if len(parts) > 1 {
-			return parts[1]
+	// Arrow function detection
+	if strings.Contains(trimmed, " => ") || strings.Contains(trimmed, "=>") {
+		// Look for patterns like "const funcName = " or "export const funcName = "
+		if strings.Contains(trimmed, "const ") {
+			idx := strings.Index(trimmed, "const ")
+			remaining := trimmed[idx+6:]
+			parts := strings.Fields(remaining)
+			if len(parts) > 0 {
+				name := parts[0]
+				if strings.Contains(name, "=") {
+					name = strings.Split(name, "=")[0]
+				}
+				return strings.TrimSpace(name)
+			}
 		}
 	}
 
-	if idx := strings.Index(line, "def "); idx != -1 {
-		parts := strings.Fields(line[idx:])
+	// Python function detection
+	if strings.Contains(trimmed, "def ") {
+		idx := strings.Index(trimmed, "def ")
+		parts := strings.Fields(trimmed[idx:])
 		if len(parts) > 1 {
-			return parts[1]
+			name := parts[1]
+			if parenIdx := strings.Index(name, "("); parenIdx != -1 {
+				name = name[:parenIdx]
+			}
+			return name
+		}
+	}
+
+	// Class detection
+	if strings.Contains(trimmed, "class ") {
+		idx := strings.Index(trimmed, "class ")
+		parts := strings.Fields(trimmed[idx:])
+		if len(parts) > 1 {
+			name := parts[1]
+			// Remove inheritance syntax
+			if colonIdx := strings.Index(name, ":"); colonIdx != -1 {
+				name = name[:colonIdx]
+			}
+			if parenIdx := strings.Index(name, "("); parenIdx != -1 {
+				name = name[:parenIdx]
+			}
+			if braceIdx := strings.Index(name, "{"); braceIdx != -1 {
+				name = name[:braceIdx]
+			}
+			return name
+		}
+	}
+
+	// Method detection (for languages like Java, C#)
+	if strings.Contains(trimmed, "public ") || strings.Contains(trimmed, "private ") || 
+	   strings.Contains(trimmed, "protected ") || strings.Contains(trimmed, "static ") {
+		parts := strings.Fields(trimmed)
+		for i, part := range parts {
+			if strings.Contains(part, "(") {
+				methodName := strings.Split(part, "(")[0]
+				// Check if this looks like a method name (not a type)
+				if i > 0 && !strings.Contains(methodName, ".") && methodName != "" {
+					return methodName
+				}
+			}
 		}
 	}
 
@@ -719,7 +983,10 @@ func analyzeFileChange(change GitChange, diff DiffInfo) FileAnalysis {
 	// Determine scope and type based on file path and content
 	scope := determineScope(file)
 	commitType := determineAdvancedCommitType(file, status, diff)
-	message := generateSmartCommitMessage(file, status, diff, commitType)
+	rawMessage := generateSmartCommitMessage(file, status, diff, commitType)
+	
+	// Format as conventional commit
+	message := formatConventionalCommit(commitType, scope, rawMessage)
 
 	return FileAnalysis{
 		Type:    commitType,
@@ -823,33 +1090,128 @@ func generateSmartCommitMessage(file, status string, diff DiffInfo, commitType s
 	fileName := filepath.Base(file)
 	fileExt := filepath.Ext(file)
 	baseName := strings.TrimSuffix(fileName, fileExt)
+	
+	// Get directory context for better messages
+	dir := filepath.Dir(file)
+	dirName := filepath.Base(dir)
 
-	// Simple, clean messages
 	switch status {
 	case "A":
-		if len(diff.Functions) > 0 && len(diff.Functions) == 1 {
-			return fmt.Sprintf("add %s function", diff.Functions[0])
+		// New file messages
+		if len(diff.Functions) > 0 {
+			if len(diff.Functions) == 1 {
+				return fmt.Sprintf("add %s function", diff.Functions[0])
+			}
+			return fmt.Sprintf("add %s with %d functions", baseName, len(diff.Functions))
 		}
+		
+		if len(diff.Imports) > 0 {
+			return fmt.Sprintf("add %s with dependencies", baseName)
+		}
+		
+		// Specific file type messages
+		if strings.HasSuffix(fileName, "_test.go") || strings.Contains(fileName, "test") {
+			return fmt.Sprintf("add tests for %s", strings.TrimSuffix(baseName, "_test"))
+		}
+		
+		if strings.HasSuffix(fileName, ".md") {
+			if fileName == "README.md" {
+				return "add README documentation"
+			}
+			return fmt.Sprintf("add %s documentation", baseName)
+		}
+		
+		if commitType == "chore" {
+			return fmt.Sprintf("add %s config", baseName)
+		}
+		
 		return fmt.Sprintf("add %s", fileName)
 
 	case "D":
 		return fmt.Sprintf("remove %s", fileName)
 
 	case "M":
-		// Short, focused messages
+		// Modified file messages - be more specific
 		if commitType == "docs" {
-			return fmt.Sprintf("update %s", baseName)
+			if fileName == "README.md" {
+				return "update README"
+			}
+			return fmt.Sprintf("update %s docs", baseName)
 		}
 
 		if commitType == "test" {
-			return fmt.Sprintf("update %s tests", baseName)
+			testSubject := strings.TrimSuffix(baseName, "_test")
+			return fmt.Sprintf("update %s tests", testSubject)
 		}
 
-		if len(diff.Functions) > 0 && len(diff.Functions) == 1 {
-			return fmt.Sprintf("update %s function", diff.Functions[0])
+		if commitType == "chore" {
+			if fileName == "package.json" || fileName == "go.mod" {
+				if len(diff.Imports) > 0 {
+					return "update dependencies"
+				}
+				return "update package config"
+			}
+			return fmt.Sprintf("update %s config", baseName)
 		}
 
-		return fmt.Sprintf("update %s", baseName)
+		// Function-specific messages
+		if len(diff.Functions) > 0 {
+			if len(diff.Functions) == 1 {
+				funcName := diff.Functions[0]
+				if commitType == "fix" {
+					return fmt.Sprintf("fix %s function", funcName)
+				} else if commitType == "refactor" {
+					return fmt.Sprintf("refactor %s function", funcName)
+				}
+				return fmt.Sprintf("update %s function", funcName)
+			} else if len(diff.Functions) <= 3 {
+				if commitType == "refactor" {
+					return fmt.Sprintf("refactor %d functions in %s", len(diff.Functions), baseName)
+				}
+				return fmt.Sprintf("update %d functions in %s", len(diff.Functions), baseName)
+			}
+		}
+
+		// Import changes
+		if len(diff.Imports) > 0 {
+			if commitType == "feat" {
+				return fmt.Sprintf("add dependencies to %s", baseName)
+			}
+			return fmt.Sprintf("update imports in %s", baseName)
+		}
+
+		// Size-based heuristics
+		if diff.LinesAdded > diff.LinesRemoved*3 {
+			// Significant additions
+			if commitType == "feat" {
+				return fmt.Sprintf("extend %s functionality", baseName)
+			}
+		} else if diff.LinesRemoved > diff.LinesAdded*2 {
+			// Significant removals
+			if commitType == "refactor" {
+				return fmt.Sprintf("simplify %s", baseName)
+			}
+			return fmt.Sprintf("clean up %s", baseName)
+		}
+
+		// Generic messages with context
+		switch commitType {
+		case "fix":
+			return fmt.Sprintf("fix issues in %s", baseName)
+		case "refactor":
+			return fmt.Sprintf("refactor %s", baseName)
+		case "feat":
+			if dirName != "." && dirName != file {
+				return fmt.Sprintf("enhance %s in %s", baseName, dirName)
+			}
+			return fmt.Sprintf("enhance %s", baseName)
+		default:
+			return fmt.Sprintf("update %s", baseName)
+		}
+
+	case "R":
+		// Renamed files
+		return fmt.Sprintf("rename %s", fileName)
 
 	default:
 		return fmt.Sprintf("modify %s", fileName)
@@ -924,4 +1286,109 @@ func getStatusIcon(status string) string {
 	default:
 		return "📄"
 	}
+}
+
+// Commit convention and hook management
+func (m model) generateCommitHook() tea.Cmd {
+	return func() tea.Msg {
+		hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
+		
+		// Check if hook already exists
+		if _, err := os.Stat(hookPath); err == nil {
+			return statusMsg{message: "ℹ️ Commit hook already exists. Use 'H' (shift+h) to remove it."}
+		}
+		
+		hookContent := `#!/bin/bash
+# Git commit message hook generated by commit-helper
+# Enforces conventional commit format: type(scope): description
+# 
+# Valid types: feat, fix, docs, style, refactor, test, chore
+# Example: feat(auth): add user authentication
+# 
+# This hook can be removed by deleting this file or using commit-helper
+
+commit_regex='^(feat|fix|docs|style|refactor|test|chore)(\(.+\))?: .{1,50}'
+
+error_msg="❌ Invalid commit message format!
+
+Expected format: <type>(<scope>): <description>
+
+Valid types:
+  • feat:     A new feature
+  • fix:      A bug fix  
+  • docs:     Documentation changes
+  • style:    Code style changes (formatting, etc)
+  • refactor: Code refactoring
+  • test:     Adding or modifying tests
+  • chore:    Build process or auxiliary tool changes
+
+Examples:
+  • feat(auth): add user authentication
+  • fix(api): resolve timeout issue
+  • docs: update README installation steps
+  • test(utils): add validation tests
+
+Your commit message:
+$(cat $1)
+
+To disable this check, delete: .git/hooks/commit-msg
+Or use the commit-helper tool (H key to remove)"
+
+if ! grep -qE "$commit_regex" "$1"; then
+    echo "$error_msg" >&2
+    exit 1
+fi
+`
+
+		err := os.WriteFile(hookPath, []byte(hookContent), 0755)
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to create commit hook: %v", err)}
+		}
+
+		return statusMsg{message: "✅ Commit hook installed at .git/hooks/commit-msg - validates conventional commit format"}
+	}
+}
+
+func (m model) removeCommitHook() tea.Cmd {
+	return func() tea.Msg {
+		hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
+		
+		// Check if hook exists
+		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
+			return statusMsg{message: "ℹ️ No commit hook found to remove"}
+		}
+		
+		err := os.Remove(hookPath)
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to remove commit hook: %v", err)}
+		}
+
+		return statusMsg{message: "✅ Commit hook removed - conventional commit validation disabled"}
+	}
+}
+
+func (m model) checkHookStatus() tea.Cmd {
+	return func() tea.Msg {
+		hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
+		
+		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
+			return statusMsg{message: "📋 Hook status: Not installed. Press 'h' to install conventional commit validation."}
+		}
+		
+		return statusMsg{message: "📋 Hook status: Installed. Press 'H' (shift+h) to remove conventional commit validation."}
+	}
+}
+
+func (m model) validateCommitMessage(message string) bool {
+	// Basic validation for conventional commits
+	conventionalRegex := `^(feat|fix|docs|style|refactor|test|chore)(\(.+\))?: .{1,50}`
+	matched, _ := regexp.MatchString(conventionalRegex, message)
+	return matched
+}
+
+func formatConventionalCommit(commitType, scope, description string) string {
+	if scope != "" {
+		return fmt.Sprintf("%s(%s): %s", commitType, scope, description)
+	}
+	return fmt.Sprintf("%s: %s", commitType, description)
 }
