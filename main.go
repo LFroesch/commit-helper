@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -20,18 +20,8 @@ import (
 type GitChange struct {
 	File   string
 	Status string
-}
-
-func (g GitChange) Title() string {
-	return fmt.Sprintf("%s %s", getStatusIcon(g.Status), g.File)
-}
-
-func (g GitChange) Description() string {
-	return fmt.Sprintf("Status: %s", g.Status)
-}
-
-func (g GitChange) FilterValue() string {
-	return g.File
+	Type   string // commit type suggestion
+	Scope  string // commit scope suggestion
 }
 
 type CommitSuggestion struct {
@@ -39,27 +29,15 @@ type CommitSuggestion struct {
 	Type    string
 }
 
-func (c CommitSuggestion) Title() string {
-	return c.Message
-}
-
-func (c CommitSuggestion) Description() string {
-	return fmt.Sprintf("Type: %s", c.Type)
-}
-
-func (c CommitSuggestion) FilterValue() string {
-	return c.Message
-}
-
 type model struct {
 	state       string // "files", "suggestions", "custom", "edit"
 	changes     []GitChange
 	suggestions []CommitSuggestion
 
-	filesList       list.Model
-	suggestionsList list.Model
-	customInput     textinput.Model
-	editInput       textinput.Model
+	filesTable       table.Model
+	suggestionsTable table.Model
+	customInput      textinput.Model
+	editInput        textinput.Model
 
 	width        int
 	height       int
@@ -79,8 +57,11 @@ type commitSuggestionsMsg []CommitSuggestion
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("86")).
-			MarginBottom(1)
+			Foreground(lipgloss.Color("86"))
+
+	repositoryStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("208"))
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
@@ -100,21 +81,48 @@ func main() {
 		height:   24,
 	}
 
-	// Initialize lists
-	delegate := list.NewDefaultDelegate()
-	delegate.SetHeight(2)
+	// Initialize files table
+	filesColumns := []table.Column{
+		{Title: "Status", Width: 8},
+		{Title: "File", Width: 50},
+		{Title: "Type", Width: 12},
+		{Title: "Scope", Width: 15},
+	}
 
-	m.filesList = list.New([]list.Item{}, delegate, 0, 0)
-	m.filesList.Title = "📁 Changed Files"
-	m.filesList.SetShowStatusBar(false)
-	m.filesList.SetFilteringEnabled(false)
-	m.filesList.SetShowHelp(false)
+	filesTable := table.New(
+		table.WithColumns(filesColumns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
 
-	m.suggestionsList = list.New([]list.Item{}, delegate, 0, 0)
-	m.suggestionsList.Title = "💡 Commit Suggestions"
-	m.suggestionsList.SetShowStatusBar(false)
-	m.suggestionsList.SetFilteringEnabled(false)
-	m.suggestionsList.SetShowHelp(false)
+	filesStyle := table.DefaultStyles()
+	filesStyle.Header = filesStyle.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		BorderBottom(true).
+		Bold(false)
+	filesStyle.Selected = filesStyle.Selected.
+		Foreground(lipgloss.Color("229")).
+		Background(lipgloss.Color("57")).
+		Bold(false)
+	filesTable.SetStyles(filesStyle)
+
+	// Initialize suggestions table
+	suggestionsColumns := []table.Column{
+		{Title: "Type", Width: 12},
+		{Title: "Message", Width: 70},
+	}
+
+	suggestionsTable := table.New(
+		table.WithColumns(suggestionsColumns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+
+	suggestionsTable.SetStyles(filesStyle) // Use same style
+
+	m.filesTable = filesTable
+	m.suggestionsTable = suggestionsTable
 
 	// Initialize custom input
 	m.customInput = textinput.New()
@@ -189,12 +197,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gitChangesMsg:
 		m.changes = []GitChange(msg)
 
-		// Convert to list items
-		items := make([]list.Item, len(m.changes))
-		for i, change := range m.changes {
-			items[i] = change
-		}
-		m.filesList.SetItems(items)
+		// Update files table
+		m.updateFilesTable()
 
 		// Auto-generate suggestions
 		cmds = append(cmds, m.generateSuggestions())
@@ -206,12 +210,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commitSuggestionsMsg:
 		m.suggestions = []CommitSuggestion(msg)
 
-		// Convert to list items
-		items := make([]list.Item, len(m.suggestions))
-		for i, suggestion := range m.suggestions {
-			items[i] = suggestion
-		}
-		m.suggestionsList.SetItems(items)
+		// Update suggestions table
+		m.updateSuggestionsTable()
 
 		m.statusMsg = fmt.Sprintf("🤖 Generated %d commit suggestions", len(m.suggestions))
 		m.statusExpiry = time.Now().Add(3 * time.Second)
@@ -222,9 +222,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		listHeight := m.height - 8
-		m.filesList.SetSize(m.width-4, listHeight)
-		m.suggestionsList.SetSize(m.width-4, listHeight)
+		tableHeight := m.height - 8
+		m.filesTable.SetHeight(tableHeight)
+		m.suggestionsTable.SetHeight(tableHeight)
+		m.adjustTableLayout()
 
 		return m, nil
 
@@ -248,8 +249,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.state {
 			case "suggestions":
 				if len(m.suggestions) > 0 {
-					selected := m.suggestionsList.SelectedItem()
-					if suggestion, ok := selected.(CommitSuggestion); ok {
+					selectedIndex := m.suggestionsTable.Cursor()
+					if selectedIndex < len(m.suggestions) {
+						suggestion := m.suggestions[selectedIndex]
 						return m, m.commitWithMessage(suggestion.Message)
 					}
 				}
@@ -308,8 +310,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case "e":
 				if m.state == "suggestions" && len(m.suggestions) > 0 {
-					selected := m.suggestionsList.SelectedItem()
-					if suggestion, ok := selected.(CommitSuggestion); ok {
+					selectedIndex := m.suggestionsTable.Cursor()
+					if selectedIndex < len(m.suggestions) {
+						suggestion := m.suggestions[selectedIndex]
 						m.state = "edit"
 						m.editInput.SetValue(suggestion.Message)
 						m.editInput.Focus()
@@ -355,9 +358,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Update the appropriate component based on state
 	switch m.state {
 	case "files":
-		m.filesList, cmd = m.filesList.Update(msg)
+		m.filesTable, cmd = m.filesTable.Update(msg)
 	case "suggestions":
-		m.suggestionsList, cmd = m.suggestionsList.Update(msg)
+		m.suggestionsTable, cmd = m.suggestionsTable.Update(msg)
 	case "custom":
 		m.customInput, cmd = m.customInput.Update(msg)
 	case "edit":
@@ -370,24 +373,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var content string
 
-	// Header
-	header := titleStyle.Render("🚀 Git Commit Helper")
-	
 	// Check hook status for display
 	hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
 	hookStatus := ""
 	if _, err := os.Stat(hookPath); err == nil {
 		hookStatus = " 🔒"
 	}
-	
-	repoInfo := helpStyle.Render(fmt.Sprintf("Repository: %s%s", filepath.Base(m.repoPath), hookStatus))
 
-	// Navigation tabs
-	tabs := lipgloss.JoinHorizontal(
+	// Create all header components
+	title := titleStyle.Render("🚀 Git Commit Helper")
+	repoInfo := repositoryStyle.Render(fmt.Sprintf(" Repository: %s%s", filepath.Base(m.repoPath), hookStatus))
+
+	// Create tabs
+	tab1 := m.renderTab("1", "📁 Files", m.state == "files")
+	tab2 := m.renderTab("2", "💡 Suggestions", m.state == "suggestions")
+	tab3 := m.renderTab("3", "✏️  Custom", m.state == "custom")
+
+	// Calculate spacing to keep everything on one line
+	spacer := strings.Repeat(" ", 2)
+
+	// Combine everything on one line
+	fullHeader := lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		m.renderTab("1", "📁 Files", m.state == "files"),
-		m.renderTab("2", "💡 Suggestions", m.state == "suggestions"),
-		m.renderTab("3", "✏️  Custom", m.state == "custom"),
+		title,
+		repoInfo,
+		spacer,
+		tab1,
+		tab2,
+		tab3,
 	)
 
 	// Content based on current state
@@ -398,7 +411,7 @@ func (m model) View() string {
 				Foreground(lipgloss.Color("240")).
 				Render("No changes found. Run 'git add' to stage files or make some changes.")
 		} else {
-			content = m.filesList.View()
+			content = m.filesTable.View()
 		}
 
 	case "suggestions":
@@ -407,7 +420,7 @@ func (m model) View() string {
 				Foreground(lipgloss.Color("240")).
 				Render("No suggestions available. Please add some files first.")
 		} else {
-			content = m.suggestionsList.View()
+			content = m.suggestionsTable.View()
 		}
 
 	case "custom":
@@ -427,15 +440,84 @@ func (m model) View() string {
 
 	// Footer with help and status
 	var footer string
+
+	// Color styles for footer
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))     // Blue color for keys
+	actionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86"))  // Green color for action text
+	bulletStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // Gray color for bullets
+
 	switch m.state {
 	case "files":
-		footer = "1-3: switch • ↑↓: navigate • r: refresh • a: add • s: status • h: install hook • H: remove hook • i: hook info • ?: help • q: quit"
+		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s\n%s: %s %s %s: %s %s %s: %s",
+			keyStyle.Render("1-3"),
+			actionStyle.Render("switch"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("↑↓"),
+			actionStyle.Render("navigate"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("r"),
+			actionStyle.Render("refresh"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("a"),
+			actionStyle.Render("add"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("s"),
+			actionStyle.Render("status"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("h"),
+			actionStyle.Render("install hook"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("H"),
+			actionStyle.Render("remove hook"),
+			keyStyle.Render("i"),
+			actionStyle.Render("hook info"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("?"),
+			actionStyle.Render("help"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("q"),
+			actionStyle.Render("quit"))
 	case "suggestions":
-		footer = "1-3: switch • ↑↓: navigate • enter: commit • e: edit • a: add • p: push • h: install hook • H: remove hook • i: hook info • ?: help • q: quit"
+		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s\n%s: %s %s %s: %s %s %s: %s",
+			keyStyle.Render("1-3"),
+			actionStyle.Render("switch"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("↑↓"),
+			actionStyle.Render("navigate"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("enter"),
+			actionStyle.Render("commit"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("e"),
+			actionStyle.Render("edit"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("a"),
+			actionStyle.Render("add"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("p"),
+			actionStyle.Render("push"),
+			keyStyle.Render("h/H"),
+			actionStyle.Render("hook mgmt"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("i/?"),
+			actionStyle.Render("info/help"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("q"),
+			actionStyle.Render("quit"))
 	case "custom":
-		footer = "enter: commit • esc: cancel • (other keys disabled while typing)"
+		footer = fmt.Sprintf("%s: %s %s %s: %s",
+			keyStyle.Render("enter"),
+			actionStyle.Render("commit"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("esc"),
+			actionStyle.Render("cancel"))
 	case "edit":
-		footer = "enter: commit • esc: back to suggestions • (other keys disabled while typing)"
+		footer = fmt.Sprintf("%s: %s %s %s: %s",
+			keyStyle.Render("enter"),
+			actionStyle.Render("commit"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("esc"),
+			actionStyle.Render("back to suggestions"))
 	}
 
 	// Add status message if present
@@ -453,10 +535,7 @@ func (m model) View() string {
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
-		header,
-		repoInfo,
-		"",
-		tabs,
+		fullHeader,
 		"",
 		content,
 		"",
@@ -488,7 +567,7 @@ func (m model) gitAddAll() tea.Cmd {
 		if err != nil {
 			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
 		}
-		
+
 		if len(strings.TrimSpace(string(statusOutput))) == 0 {
 			return statusMsg{message: "ℹ️ No changes to stage"}
 		}
@@ -515,7 +594,7 @@ func (m model) gitPush() tea.Cmd {
 		if err != nil {
 			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
 		}
-		
+
 		statusStr := string(statusOutput)
 		if !strings.Contains(statusStr, "ahead") {
 			return statusMsg{message: "ℹ️ No commits to push"}
@@ -564,7 +643,7 @@ func (m model) commitWithMessage(message string) tea.Cmd {
 		if err != nil {
 			return statusMsg{message: fmt.Sprintf("❌ Failed to check staged changes: %v", err)}
 		}
-		
+
 		if len(strings.TrimSpace(string(statusOutput))) == 0 {
 			return statusMsg{message: "❌ No staged changes to commit. Use 'a' to stage files first."}
 		}
@@ -661,7 +740,7 @@ func generateCombinedSuggestion(individual []CommitSuggestion, grouped []CommitS
 	// Count types to determine the main focus
 	typeCounts := make(map[string]int)
 	scopeCounts := make(map[string]int)
-	
+
 	for _, suggestion := range individual {
 		typeCounts[suggestion.Type]++
 		// Extract scope from message if formatted conventionally
@@ -684,7 +763,7 @@ func generateCombinedSuggestion(individual []CommitSuggestion, grouped []CommitS
 			mainType = commitType
 		}
 	}
-	
+
 	maxScopeCount := 0
 	for scope, count := range scopeCounts {
 		if count > maxScopeCount {
@@ -794,8 +873,8 @@ func parseDiffOutput(diff string) DiffInfo {
 			}
 
 			// Detect documentation
-			if strings.Contains(line, "//") || strings.Contains(line, "/*") || 
-			   strings.Contains(line, "/**") || strings.Contains(line, "#") {
+			if strings.Contains(line, "//") || strings.Contains(line, "/*") ||
+				strings.Contains(line, "/**") || strings.Contains(line, "#") {
 				info.HasDocs = true
 			}
 		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
@@ -818,16 +897,16 @@ func contains(slice []string, item string) bool {
 func isImportLine(line string) bool {
 	trimmed := strings.TrimSpace(line[1:]) // Remove the + prefix
 	return strings.HasPrefix(trimmed, "import ") ||
-		   strings.HasPrefix(trimmed, "from ") ||
-		   strings.HasPrefix(trimmed, "#include") ||
-		   strings.HasPrefix(trimmed, "require(") ||
-		   strings.HasPrefix(trimmed, "const ") && strings.Contains(trimmed, "require(") ||
-		   strings.HasPrefix(trimmed, "use ")
+		strings.HasPrefix(trimmed, "from ") ||
+		strings.HasPrefix(trimmed, "#include") ||
+		strings.HasPrefix(trimmed, "require(") ||
+		strings.HasPrefix(trimmed, "const ") && strings.Contains(trimmed, "require(") ||
+		strings.HasPrefix(trimmed, "use ")
 }
 
 func extractImportName(line string) string {
 	trimmed := strings.TrimSpace(line[1:]) // Remove the + prefix
-	
+
 	// Go imports
 	if strings.HasPrefix(trimmed, "import ") {
 		parts := strings.Fields(trimmed)
@@ -840,7 +919,7 @@ func extractImportName(line string) string {
 			return importPath
 		}
 	}
-	
+
 	// Python imports
 	if strings.HasPrefix(trimmed, "from ") {
 		parts := strings.Fields(trimmed)
@@ -848,7 +927,7 @@ func extractImportName(line string) string {
 			return parts[1]
 		}
 	}
-	
+
 	// JavaScript/Node requires
 	if strings.Contains(trimmed, "require(") {
 		start := strings.Index(trimmed, "require(") + 8
@@ -862,7 +941,7 @@ func extractImportName(line string) string {
 			return pkg
 		}
 	}
-	
+
 	return ""
 }
 
@@ -876,7 +955,7 @@ func extractFunctionName(line string) string {
 	if strings.Contains(trimmed, "func ") {
 		idx := strings.Index(trimmed, "func ")
 		remaining := trimmed[idx+5:]
-		
+
 		// Handle receiver methods like "func (r *Receiver) Method("
 		if strings.HasPrefix(remaining, "(") {
 			parenEnd := strings.Index(remaining, ")")
@@ -884,7 +963,7 @@ func extractFunctionName(line string) string {
 				remaining = strings.TrimSpace(remaining[parenEnd+1:])
 			}
 		}
-		
+
 		parts := strings.Fields(remaining)
 		if len(parts) > 0 {
 			name := parts[0]
@@ -959,8 +1038,8 @@ func extractFunctionName(line string) string {
 	}
 
 	// Method detection (for languages like Java, C#)
-	if strings.Contains(trimmed, "public ") || strings.Contains(trimmed, "private ") || 
-	   strings.Contains(trimmed, "protected ") || strings.Contains(trimmed, "static ") {
+	if strings.Contains(trimmed, "public ") || strings.Contains(trimmed, "private ") ||
+		strings.Contains(trimmed, "protected ") || strings.Contains(trimmed, "static ") {
 		parts := strings.Fields(trimmed)
 		for i, part := range parts {
 			if strings.Contains(part, "(") {
@@ -984,7 +1063,7 @@ func analyzeFileChange(change GitChange, diff DiffInfo) FileAnalysis {
 	scope := determineScope(file)
 	commitType := determineAdvancedCommitType(file, status, diff)
 	rawMessage := generateSmartCommitMessage(file, status, diff, commitType)
-	
+
 	// Format as conventional commit
 	message := formatConventionalCommit(commitType, scope, rawMessage)
 
@@ -1090,7 +1169,7 @@ func generateSmartCommitMessage(file, status string, diff DiffInfo, commitType s
 	fileName := filepath.Base(file)
 	fileExt := filepath.Ext(file)
 	baseName := strings.TrimSuffix(fileName, fileExt)
-	
+
 	// Get directory context for better messages
 	dir := filepath.Dir(file)
 	dirName := filepath.Base(dir)
@@ -1104,27 +1183,27 @@ func generateSmartCommitMessage(file, status string, diff DiffInfo, commitType s
 			}
 			return fmt.Sprintf("add %s with %d functions", baseName, len(diff.Functions))
 		}
-		
+
 		if len(diff.Imports) > 0 {
 			return fmt.Sprintf("add %s with dependencies", baseName)
 		}
-		
+
 		// Specific file type messages
 		if strings.HasSuffix(fileName, "_test.go") || strings.Contains(fileName, "test") {
 			return fmt.Sprintf("add tests for %s", strings.TrimSuffix(baseName, "_test"))
 		}
-		
+
 		if strings.HasSuffix(fileName, ".md") {
 			if fileName == "README.md" {
 				return "add README documentation"
 			}
 			return fmt.Sprintf("add %s documentation", baseName)
 		}
-		
+
 		if commitType == "chore" {
 			return fmt.Sprintf("add %s config", baseName)
 		}
-		
+
 		return fmt.Sprintf("add %s", fileName)
 
 	case "D":
@@ -1292,12 +1371,12 @@ func getStatusIcon(status string) string {
 func (m model) generateCommitHook() tea.Cmd {
 	return func() tea.Msg {
 		hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
-		
+
 		// Check if hook already exists
 		if _, err := os.Stat(hookPath); err == nil {
 			return statusMsg{message: "ℹ️ Commit hook already exists. Use 'H' (shift+h) to remove it."}
 		}
-		
+
 		hookContent := `#!/bin/bash
 # Git commit message hook generated by commit-helper
 # Enforces conventional commit format: type(scope): description
@@ -1352,12 +1431,12 @@ fi
 func (m model) removeCommitHook() tea.Cmd {
 	return func() tea.Msg {
 		hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
-		
+
 		// Check if hook exists
 		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 			return statusMsg{message: "ℹ️ No commit hook found to remove"}
 		}
-		
+
 		err := os.Remove(hookPath)
 		if err != nil {
 			return statusMsg{message: fmt.Sprintf("❌ Failed to remove commit hook: %v", err)}
@@ -1370,11 +1449,11 @@ func (m model) removeCommitHook() tea.Cmd {
 func (m model) checkHookStatus() tea.Cmd {
 	return func() tea.Msg {
 		hookPath := filepath.Join(m.repoPath, ".git", "hooks", "commit-msg")
-		
+
 		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 			return statusMsg{message: "📋 Hook status: Not installed. Press 'h' to install conventional commit validation."}
 		}
-		
+
 		return statusMsg{message: "📋 Hook status: Installed. Press 'H' (shift+h) to remove conventional commit validation."}
 	}
 }
@@ -1391,4 +1470,58 @@ func formatConventionalCommit(commitType, scope, description string) string {
 		return fmt.Sprintf("%s(%s): %s", commitType, scope, description)
 	}
 	return fmt.Sprintf("%s: %s", commitType, description)
+}
+
+func (m *model) updateFilesTable() {
+	var rows []table.Row
+	for _, change := range m.changes {
+		// Analyze the change to get type and scope
+		diffInfo := getFileDiff(change.File)
+		analysis := analyzeFileChange(change, diffInfo)
+
+		// Update the change with analysis results
+		change.Type = analysis.Type
+		change.Scope = analysis.Scope
+
+		row := table.Row{
+			getStatusIcon(change.Status),
+			change.File,
+			change.Type,
+			change.Scope,
+		}
+		rows = append(rows, row)
+	}
+	m.filesTable.SetRows(rows)
+}
+
+func (m *model) updateSuggestionsTable() {
+	var rows []table.Row
+	for _, suggestion := range m.suggestions {
+		row := table.Row{
+			suggestion.Type,
+			suggestion.Message,
+		}
+		rows = append(rows, row)
+	}
+	m.suggestionsTable.SetRows(rows)
+}
+
+func (m *model) adjustTableLayout() {
+	availableWidth := m.width - 6
+
+	// Adjust files table columns
+	filesColumns := []table.Column{
+		{Title: "Status", Width: 20},
+		{Title: "File", Width: availableWidth - 60},
+		{Title: "Type", Width: 20},
+		{Title: "Scope", Width: 20},
+	}
+	m.filesTable.SetColumns(filesColumns)
+
+	// Adjust suggestions table columns
+	suggestionsColumns := []table.Column{
+		{Title: "Type", Width: 12},
+		{Title: "Message", Width: availableWidth - 15},
+	}
+	m.suggestionsTable.SetColumns(suggestionsColumns)
 }
