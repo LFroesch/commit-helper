@@ -5,52 +5,64 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type GitChange struct {
-	File             string `json:"file"`
-	Status           string `json:"status"`
-	SuggestedType    string `json:"suggested_type"`
-	SuggestedScope   string `json:"suggested_scope"`
-	SuggestedMessage string `json:"suggested_message"`
+	File   string
+	Status string
+}
+
+func (g GitChange) Title() string {
+	return fmt.Sprintf("%s %s", getStatusIcon(g.Status), g.File)
+}
+
+func (g GitChange) Description() string {
+	return fmt.Sprintf("Status: %s", g.Status)
+}
+
+func (g GitChange) FilterValue() string {
+	return g.File
 }
 
 type CommitSuggestion struct {
-	Type       string  `json:"type"`
-	Scope      string  `json:"scope"`
-	Message    string  `json:"message"`
-	Breaking   bool    `json:"breaking"`
-	Confidence float64 `json:"confidence"`
+	Message string
+	Type    string
+}
+
+func (c CommitSuggestion) Title() string {
+	return c.Message
+}
+
+func (c CommitSuggestion) Description() string {
+	return fmt.Sprintf("Type: %s", c.Type)
+}
+
+func (c CommitSuggestion) FilterValue() string {
+	return c.Message
 }
 
 type model struct {
-	currentPage string // "changes", "suggestions", "history"
+	state       string // "files", "suggestions", "custom"
 	changes     []GitChange
 	suggestions []CommitSuggestion
-
-	changesTable     table.Model
-	suggestionsTable table.Model
-	historyTable     table.Model
-
-	editMode  bool
-	editRow   int
-	editCol   int
-	textInput textinput.Model
-
+	
+	filesList        list.Model
+	suggestionsList  list.Model
+	customInput      textinput.Model
+	
 	width        int
 	height       int
 	statusMsg    string
 	statusExpiry time.Time
-
+	
 	repoPath string
 }
 
@@ -61,11 +73,24 @@ type statusMsg struct {
 type gitChangesMsg []GitChange
 type commitSuggestionsMsg []CommitSuggestion
 
-func showStatus(msg string) tea.Cmd {
-	return func() tea.Msg {
-		return statusMsg{message: msg}
-	}
-}
+var (
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("86")).
+			MarginBottom(1)
+	
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			MarginTop(1)
+	
+	statusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("86")).
+			Bold(true)
+	
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
+)
 
 func main() {
 	repoPath, err := findGitRepo()
@@ -74,18 +99,32 @@ func main() {
 	}
 
 	m := model{
-		currentPage: "changes",
-		repoPath:    repoPath,
-		width:       100,
-		height:      24,
-		editMode:    false,
-		editRow:     -1,
-		editCol:     -1,
+		state:    "files",
+		repoPath: repoPath,
+		width:    100,
+		height:   24,
 	}
 
-	m.textInput = textinput.New()
-	m.textInput.CharLimit = 200
-	m.initializeTables()
+	// Initialize lists
+	delegate := list.NewDefaultDelegate()
+	delegate.SetHeight(2)
+	
+	m.filesList = list.New([]list.Item{}, delegate, 0, 0)
+	m.filesList.Title = "📁 Changed Files"
+	m.filesList.SetShowStatusBar(false)
+	m.filesList.SetFilteringEnabled(false)
+	m.filesList.SetShowHelp(false)
+	
+	m.suggestionsList = list.New([]list.Item{}, delegate, 0, 0)
+	m.suggestionsList.Title = "💡 Commit Suggestions"
+	m.suggestionsList.SetShowStatusBar(false)
+	m.suggestionsList.SetFilteringEnabled(false)
+	m.suggestionsList.SetShowHelp(false)
+	
+	// Initialize custom input
+	m.customInput = textinput.New()
+	m.customInput.Placeholder = "Enter your custom commit message..."
+	m.customInput.CharLimit = 200
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -102,69 +141,9 @@ func findGitRepo() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func (m *model) initializeTables() {
-	changeColumns := []table.Column{
-		{Title: "Status", Width: 8},
-		{Title: "File", Width: 40},
-		{Title: "Type", Width: 12},
-		{Title: "Scope", Width: 15},
-		{Title: "Message", Width: 35},
-	}
-
-	m.changesTable = table.New(
-		table.WithColumns(changeColumns),
-		table.WithFocused(true),
-		table.WithHeight(15),
-	)
-
-	suggestionColumns := []table.Column{
-		{Title: "Type", Width: 12},
-		{Title: "Scope", Width: 15},
-		{Title: "Message", Width: 50},
-		{Title: "Confidence", Width: 12},
-		{Title: "Breaking", Width: 10},
-	}
-
-	m.suggestionsTable = table.New(
-		table.WithColumns(suggestionColumns),
-		table.WithFocused(true),
-		table.WithHeight(15),
-	)
-
-	historyColumns := []table.Column{
-		{Title: "Hash", Width: 8},
-		{Title: "Type", Width: 12},
-		{Title: "Scope", Width: 15},
-		{Title: "Message", Width: 45},
-		{Title: "Author", Width: 15},
-		{Title: "Date", Width: 12},
-	}
-
-	m.historyTable = table.New(
-		table.WithColumns(historyColumns),
-		table.WithFocused(true),
-		table.WithHeight(15),
-	)
-
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		BorderBottom(true).
-		Bold(false)
-	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("57")).
-		Bold(false)
-
-	m.changesTable.SetStyles(s)
-	m.suggestionsTable.SetStyles(s)
-	m.historyTable.SetStyles(s)
-}
-
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
-		tea.SetWindowTitle("Git Commit Message Generator"),
+		tea.SetWindowTitle("Git Commit Helper"),
 		m.loadGitChanges(),
 	)
 }
@@ -188,6 +167,7 @@ func (m model) generateSuggestions() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
 	case statusMsg:
@@ -197,284 +177,215 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case gitChangesMsg:
 		m.changes = []GitChange(msg)
-		m.updateChangesTable()
-		return m, tea.Batch(
-			showStatus(fmt.Sprintf("✅ Loaded %d changes", len(m.changes))),
-			m.generateSuggestions(),
-		)
+		
+		// Convert to list items
+		items := make([]list.Item, len(m.changes))
+		for i, change := range m.changes {
+			items[i] = change
+		}
+		m.filesList.SetItems(items)
+		
+		// Auto-generate suggestions
+		cmds = append(cmds, m.generateSuggestions())
+		m.statusMsg = fmt.Sprintf("✅ Loaded %d changed files", len(m.changes))
+		m.statusExpiry = time.Now().Add(3 * time.Second)
+		
+		return m, tea.Batch(cmds...)
 
 	case commitSuggestionsMsg:
 		m.suggestions = []CommitSuggestion(msg)
-		m.updateSuggestionsTable()
-		return m, showStatus(fmt.Sprintf("🤖 Generated %d suggestions", len(m.suggestions)))
+		
+		// Convert to list items
+		items := make([]list.Item, len(m.suggestions))
+		for i, suggestion := range m.suggestions {
+			items[i] = suggestion
+		}
+		m.suggestionsList.SetItems(items)
+		
+		m.statusMsg = fmt.Sprintf("🤖 Generated %d commit suggestions", len(m.suggestions))
+		m.statusExpiry = time.Now().Add(3 * time.Second)
+		
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.adjustLayout()
+		
+		listHeight := m.height - 8
+		m.filesList.SetSize(m.width-4, listHeight)
+		m.suggestionsList.SetSize(m.width-4, listHeight)
+		
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.editMode {
-			return m.updateEdit(msg)
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+
+		case "1":
+			m.state = "files"
+			return m, nil
+			
+		case "2":
+			if len(m.suggestions) > 0 {
+				m.state = "suggestions"
+			}
+			return m, nil
+			
+		case "3":
+			m.state = "custom"
+			m.customInput.Focus()
+			return m, nil
+
+		case "r":
+			return m, tea.Batch(
+				m.loadGitChanges(),
+				func() tea.Msg {
+					return statusMsg{message: "🔄 Refreshing..."}
+				},
+			)
+
+		case "a":
+			return m, m.gitAddAll()
+
+		case "p":
+			return m, m.gitPush()
+
+		case "s":
+			return m, m.gitStatus()
+
+		case "enter":
+			switch m.state {
+			case "suggestions":
+				if len(m.suggestions) > 0 {
+					selected := m.suggestionsList.SelectedItem()
+					if suggestion, ok := selected.(CommitSuggestion); ok {
+						return m, m.commitWithMessage(suggestion.Message)
+					}
+				}
+			case "custom":
+				if m.customInput.Value() != "" {
+					return m, m.commitWithMessage(m.customInput.Value())
+				}
+			}
+			return m, nil
+
+		case "esc":
+			if m.state == "custom" {
+				m.customInput.Blur()
+				m.customInput.SetValue("")
+				m.state = "files"
+			}
+			return m, nil
 		}
-		return m.updateNormal(msg)
 	}
 
-	if !m.editMode {
-		switch m.currentPage {
-		case "changes":
-			m.changesTable, cmd = m.changesTable.Update(msg)
-		case "suggestions":
-			m.suggestionsTable, cmd = m.suggestionsTable.Update(msg)
-		case "history":
-			m.historyTable, cmd = m.historyTable.Update(msg)
-		}
-	}
-
-	return m, cmd
-}
-
-func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "ctrl+c":
-		return m, tea.Quit
-
-	case "1":
-		m.currentPage = "changes"
-		return m, nil
-	case "2":
-		m.currentPage = "suggestions"
-		return m, nil
-	case "3":
-		m.currentPage = "history"
-		return m, m.loadGitHistory()
-
-	case "e":
-		m.startEdit()
-		return m, nil
-	case "r":
-		return m, tea.Batch(
-			m.loadGitChanges(),
-			showStatus("🔄 Refreshing..."),
-		)
-	case "g":
-		return m, m.generateSuggestions()
-	case "c", "enter":
-		if m.currentPage == "suggestions" && len(m.suggestions) > 0 {
-			return m, m.commitWithSuggestion()
-		}
-		return m, nil
-	case "a":
-		return m, m.gitAddAll()
-	case "p":
-		return m, m.gitPush()
-	case "s":
-		return m, m.gitStatus()
-	}
-
-	// Let table handle all other keys (including arrows, j/k, mouse)
-	var cmd tea.Cmd
-	switch m.currentPage {
-	case "changes":
-		m.changesTable, cmd = m.changesTable.Update(msg)
+	// Update the appropriate component based on state
+	switch m.state {
+	case "files":
+		m.filesList, cmd = m.filesList.Update(msg)
 	case "suggestions":
-		m.suggestionsTable, cmd = m.suggestionsTable.Update(msg)
-	case "history":
-		m.historyTable, cmd = m.historyTable.Update(msg)
+		m.suggestionsList, cmd = m.suggestionsList.Update(msg)
+	case "custom":
+		m.customInput, cmd = m.customInput.Update(msg)
 	}
+
 	return m, cmd
 }
 
-func (m model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.cancelEdit()
-		return m, nil
-	case "enter":
-		m.saveEdit()
-		m.cancelEdit()
-		return m, showStatus("✅ Updated")
-	case "tab":
-		m.saveEdit()
-		m.editCol = (m.editCol + 1) % 3
-		if m.editCol == 0 {
-			m.editCol = 2
+func (m model) View() string {
+	var content string
+	
+	// Header
+	header := titleStyle.Render("🚀 Git Commit Helper")
+	repoInfo := helpStyle.Render(fmt.Sprintf("Repository: %s", filepath.Base(m.repoPath)))
+	
+	// Navigation tabs
+	tabs := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		m.renderTab("1", "📁 Files", m.state == "files"),
+		m.renderTab("2", "💡 Suggestions", m.state == "suggestions"),
+		m.renderTab("3", "✏️  Custom", m.state == "custom"),
+	)
+	
+	// Content based on current state
+	switch m.state {
+	case "files":
+		if len(m.changes) == 0 {
+			content = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Render("No changes found. Run 'git add' to stage files or make some changes.")
+		} else {
+			content = m.filesList.View()
 		}
-		m.setEditValue()
-		return m, nil
+		
+	case "suggestions":
+		if len(m.suggestions) == 0 {
+			content = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Render("No suggestions available. Please add some files first.")
+		} else {
+			content = m.suggestionsList.View()
+		}
+		
+	case "custom":
+		inputLabel := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("86")).
+			Render("Custom Commit Message:")
+		content = fmt.Sprintf("%s\n\n%s", inputLabel, m.customInput.View())
 	}
-
-	var cmd tea.Cmd
-	m.textInput, cmd = m.textInput.Update(msg)
-	return m, cmd
+	
+	// Footer with help and status
+	var footer string
+	switch m.state {
+	case "files":
+		footer = "1-3: switch mode • ↑↓: navigate • r: refresh • a: git add • s: status • q: quit"
+	case "suggestions":
+		footer = "1-3: switch mode • ↑↓: navigate • enter: commit • a: git add • p: push • q: quit"
+	case "custom":
+		footer = "1-3: switch mode • enter: commit • esc: cancel • a: git add • p: push • q: quit"
+	}
+	
+	// Add status message if present
+	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
+		var statusColor lipgloss.Color = "86"
+		if strings.Contains(m.statusMsg, "❌") {
+			statusColor = "196"
+		}
+		statusLine := lipgloss.NewStyle().
+			Foreground(statusColor).
+			Bold(true).
+			Render(" > " + m.statusMsg)
+		footer = footer + "\n" + statusLine
+	}
+	
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		repoInfo,
+		"",
+		tabs,
+		"",
+		content,
+		"",
+		helpStyle.Render(footer),
+	)
 }
 
-func (m *model) adjustLayout() {
-	tableHeight := m.height - 8
-	if tableHeight < 10 {
-		tableHeight = 10
+func (m model) renderTab(key, label string, active bool) string {
+	style := lipgloss.NewStyle().Padding(0, 2)
+	
+	if active {
+		style = style.
+			Bold(true).
+			Foreground(lipgloss.Color("86")).
+			Background(lipgloss.Color("240"))
+	} else {
+		style = style.Foreground(lipgloss.Color("240"))
 	}
-
-	m.changesTable.SetHeight(tableHeight)
-	m.suggestionsTable.SetHeight(tableHeight)
-	m.historyTable.SetHeight(tableHeight)
-}
-
-func (m *model) updateChangesTable() {
-	var rows []table.Row
-
-	for _, change := range m.changes {
-		statusIcon := getStatusIcon(change.Status)
-		rows = append(rows, table.Row{
-			statusIcon,
-			truncateString(change.File, 38),
-			change.SuggestedType,
-			change.SuggestedScope,
-			truncateString(change.SuggestedMessage, 33),
-		})
-	}
-
-	m.changesTable.SetRows(rows)
-}
-
-func (m *model) updateSuggestionsTable() {
-	var rows []table.Row
-
-	for _, suggestion := range m.suggestions {
-		breaking := "No"
-		if suggestion.Breaking {
-			breaking = "⚠️ YES"
-		}
-
-		confidence := fmt.Sprintf("%.0f%%", suggestion.Confidence*100)
-
-		rows = append(rows, table.Row{
-			suggestion.Type,
-			suggestion.Scope,
-			truncateString(suggestion.Message, 48),
-			confidence,
-			breaking,
-		})
-	}
-
-	m.suggestionsTable.SetRows(rows)
-}
-
-func (m *model) startEdit() {
-	if m.currentPage == "changes" && len(m.changes) > 0 {
-		m.editMode = true
-		m.editRow = m.changesTable.Cursor()
-		m.editCol = 2
-		m.setEditValue()
-		m.textInput.Focus()
-	}
-}
-
-func (m *model) setEditValue() {
-	if m.currentPage == "changes" && m.editRow >= 0 && m.editRow < len(m.changes) {
-		change := &m.changes[m.editRow]
-		switch m.editCol {
-		case 2:
-			m.textInput.SetValue(change.SuggestedType)
-		case 3:
-			m.textInput.SetValue(change.SuggestedScope)
-		case 4:
-			m.textInput.SetValue(change.SuggestedMessage)
-		}
-	}
-}
-
-func (m *model) saveEdit() {
-	if m.currentPage == "changes" && m.editRow >= 0 && m.editRow < len(m.changes) {
-		value := m.textInput.Value()
-		change := &m.changes[m.editRow]
-
-		switch m.editCol {
-		case 2:
-			change.SuggestedType = value
-		case 3:
-			change.SuggestedScope = value
-		case 4:
-			change.SuggestedMessage = value
-		}
-
-		m.updateChangesTable()
-	}
-}
-
-func (m *model) cancelEdit() {
-	m.editMode = false
-	m.editRow = -1
-	m.editCol = -1
-	m.textInput.Blur()
-	m.textInput.SetValue("")
-}
-
-func (m model) loadGitHistory() tea.Cmd {
-	return func() tea.Msg {
-		cmd := exec.Command("git", "log", "--oneline", "-10", "--pretty=format:%h|%s|%an|%ad", "--date=short")
-		cmd.Dir = m.repoPath
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
-
-		output, err := cmd.Output()
-		if err != nil {
-			return statusMsg{message: fmt.Sprintf("❌ Failed to load history: %v", err)}
-		}
-
-		var rows []table.Row
-		lines := strings.Split(string(output), "\n")
-
-		for _, line := range lines {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-
-			parts := strings.Split(line, "|")
-			if len(parts) >= 4 {
-				commitType, scope, message := parseCommitMessage(parts[1])
-
-				rows = append(rows, table.Row{
-					parts[0],
-					commitType,
-					scope,
-					truncateString(message, 43),
-					truncateString(parts[2], 13),
-					parts[3],
-				})
-			}
-		}
-
-		m.historyTable.SetRows(rows)
-		return statusMsg{message: "📜 Loaded history"}
-	}
-}
-
-func (m model) commitWithSuggestion() tea.Cmd {
-	return func() tea.Msg {
-		suggestion := m.suggestions[m.suggestionsTable.Cursor()]
-
-		commitMsg := fmt.Sprintf("%s", suggestion.Type)
-		if suggestion.Scope != "" {
-			commitMsg = fmt.Sprintf("%s(%s)", suggestion.Type, suggestion.Scope)
-		}
-		commitMsg = fmt.Sprintf("%s: %s", commitMsg, suggestion.Message)
-
-		if suggestion.Breaking {
-			commitMsg = commitMsg + "\n\nBREAKING CHANGE: This commit introduces breaking changes"
-		}
-
-		cmd := exec.Command("git", "commit", "-m", commitMsg)
-		cmd.Dir = m.repoPath
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
-
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return statusMsg{message: fmt.Sprintf("❌ Commit failed: %v - %s", err, string(output))}
-		}
-
-		return statusMsg{message: fmt.Sprintf("✅ Committed: %s", suggestion.Message)}
-	}
+	
+	return style.Render(fmt.Sprintf("[%s] %s", key, label))
 }
 
 func (m model) gitAddAll() tea.Cmd {
@@ -527,71 +438,20 @@ func (m model) gitStatus() tea.Cmd {
 	}
 }
 
-func (m model) View() string {
-	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).
-		Render("🔄 Git Commit Message Generator")
+// Git operation functions
+func (m model) commitWithMessage(message string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "commit", "-m", message)
+		cmd.Dir = m.repoPath
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
 
-	repoInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).
-		Render(fmt.Sprintf("Repository: %s", filepath.Base(m.repoPath)))
-
-	tabs := lipgloss.JoinHorizontal(lipgloss.Top,
-		m.renderTab("1", "Changes", m.currentPage == "changes"),
-		m.renderTab("2", "Suggestions", m.currentPage == "suggestions"),
-		m.renderTab("3", "History", m.currentPage == "history"),
-	)
-
-	var tableView string
-	var footer string
-
-	switch m.currentPage {
-	case "changes":
-		tableView = m.changesTable.View()
-		if m.editMode {
-			colNames := []string{"", "", "Type", "Scope", "Message"}
-			footer = fmt.Sprintf("Editing %s: %s | tab: next • enter: save • esc: cancel",
-				colNames[m.editCol], m.textInput.View())
-		} else {
-			footer = "1-3: pages • ↑↓/jk: navigate • e: edit • a: git add • r: refresh • q: quit"
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Commit failed: %v - %s", err, string(output))}
 		}
 
-	case "suggestions":
-		tableView = m.suggestionsTable.View()
-		footer = "1-3: pages • ↑↓/jk: navigate • c/enter: commit • a: git add • p: git push • g: regenerate • q: quit"
-
-	case "history":
-		tableView = m.historyTable.View()
-		footer = "1-3: pages • ↑↓/jk: navigate • s: git status • a: git add • p: git push • q: quit"
+		return statusMsg{message: fmt.Sprintf("✅ Committed: %s", message)}
 	}
-
-	var statusMessage string
-	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
-		color := lipgloss.Color("86")
-		if strings.Contains(m.statusMsg, "❌") {
-			color = lipgloss.Color("196")
-		}
-		statusStyle := lipgloss.NewStyle().Foreground(color)
-		statusMessage = " > " + statusStyle.Render(m.statusMsg)
-	}
-
-	fullFooter := footer + statusMessage
-
-	return fmt.Sprintf("%s\n%s\n\n%s\n\n%s\n\n%s", header, repoInfo, tabs, tableView, fullFooter)
-}
-
-func (m model) renderTab(key, label string, active bool) string {
-	if active {
-		return lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("86")).
-			Background(lipgloss.Color("240")).
-			Padding(0, 2).
-			Render(fmt.Sprintf("[%s] %s", key, label))
-	}
-
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Padding(0, 2).
-		Render(fmt.Sprintf("[%s] %s", key, label))
 }
 
 func getGitChanges(repoPath string) ([]GitChange, error) {
@@ -624,53 +484,53 @@ func getGitChanges(repoPath string) ([]GitChange, error) {
 			Status: status,
 		}
 
-		analyzeChange(&change)
 		changes = append(changes, change)
 	}
 
 	return changes, nil
 }
 
-func analyzeChange(change *GitChange) {
-	file := change.File
-	status := change.Status
+func analyzeChangesForCommits(changes []GitChange) []CommitSuggestion {
+	var suggestions []CommitSuggestion
 
-	scope := determineScope(file)
-	commitType := determineCommitType(file, status)
-	message := generateCommitMessage(file, status, commitType)
-
-	change.SuggestedType = commitType
-	change.SuggestedScope = scope
-	change.SuggestedMessage = message
-}
-
-func determineScope(file string) string {
-	if strings.Contains(file, "test") {
-		return "test"
-	}
-	if strings.Contains(file, "doc") || strings.HasSuffix(file, ".md") {
-		return "docs"
-	}
-	if strings.Contains(file, "config") || strings.Contains(file, ".json") || strings.Contains(file, ".yaml") {
-		return "config"
-	}
-	if strings.Contains(file, "api") {
-		return "api"
-	}
-	if strings.Contains(file, "ui") || strings.Contains(file, "component") {
-		return "ui"
+	// Group by type for better suggestions
+	typeGroups := make(map[string][]GitChange)
+	for _, change := range changes {
+		commitType := determineCommitType(change.File, change.Status)
+		typeGroups[commitType] = append(typeGroups[commitType], change)
 	}
 
-	parts := strings.Split(file, "/")
-	if len(parts) > 1 {
-		dir := parts[0]
-		if dir == "src" && len(parts) > 2 {
-			return parts[1]
+	for commitType, groupChanges := range typeGroups {
+		var message string
+
+		if len(groupChanges) == 1 {
+			message = generateCommitMessage(groupChanges[0].File, groupChanges[0].Status, commitType)
+		} else {
+			switch commitType {
+			case "feat":
+				message = fmt.Sprintf("add %d new features", len(groupChanges))
+			case "fix":
+				message = fmt.Sprintf("fix %d issues", len(groupChanges))
+			case "docs":
+				message = fmt.Sprintf("update documentation (%d files)", len(groupChanges))
+			case "test":
+				message = fmt.Sprintf("add tests (%d files)", len(groupChanges))
+			case "chore":
+				message = fmt.Sprintf("update configuration (%d files)", len(groupChanges))
+			default:
+				message = fmt.Sprintf("update %d files", len(groupChanges))
+			}
 		}
-		return dir
+
+		suggestion := CommitSuggestion{
+			Type:    commitType,
+			Message: message,
+		}
+
+		suggestions = append(suggestions, suggestion)
 	}
 
-	return ""
+	return suggestions
 }
 
 func determineCommitType(file, status string) string {
@@ -720,104 +580,23 @@ func generateCommitMessage(file, status, commitType string) string {
 	}
 }
 
-func analyzeChangesForCommits(changes []GitChange) []CommitSuggestion {
-	var suggestions []CommitSuggestion
-
-	typeGroups := make(map[string][]GitChange)
-	for _, change := range changes {
-		key := fmt.Sprintf("%s:%s", change.SuggestedType, change.SuggestedScope)
-		typeGroups[key] = append(typeGroups[key], change)
-	}
-
-	for key, groupChanges := range typeGroups {
-		parts := strings.Split(key, ":")
-		commitType := parts[0]
-		scope := parts[1]
-
-		var message string
-
-		if len(groupChanges) == 1 {
-			message = groupChanges[0].SuggestedMessage
-		} else {
-			switch commitType {
-			case "feat":
-				message = fmt.Sprintf("add %s functionality", scope)
-			case "fix":
-				message = fmt.Sprintf("fix %s issues", scope)
-			case "docs":
-				message = fmt.Sprintf("update %s documentation", scope)
-			case "test":
-				message = fmt.Sprintf("add %s tests", scope)
-			case "chore":
-				message = fmt.Sprintf("update %s configuration", scope)
-			default:
-				message = fmt.Sprintf("update %s", scope)
-			}
-		}
-
-		confidence := 0.8
-		if len(groupChanges) == 1 {
-			confidence = 0.9
-		}
-
-		suggestion := CommitSuggestion{
-			Type:       commitType,
-			Scope:      scope,
-			Message:    message,
-			Breaking:   false,
-			Confidence: confidence,
-		}
-
-		suggestions = append(suggestions, suggestion)
-	}
-
-	return suggestions
-}
-
-func parseCommitMessage(message string) (string, string, string) {
-	re := regexp.MustCompile(`^([a-zA-Z]+)(?:\(([^)]+)\))?\s*:\s*(.+)$`)
-	matches := re.FindStringSubmatch(message)
-
-	if len(matches) >= 4 {
-		return matches[1], matches[2], matches[3]
-	}
-
-	commitType := "chore"
-	if strings.Contains(strings.ToLower(message), "fix") {
-		commitType = "fix"
-	} else if strings.Contains(strings.ToLower(message), "add") || strings.Contains(strings.ToLower(message), "feat") {
-		commitType = "feat"
-	} else if strings.Contains(strings.ToLower(message), "doc") {
-		commitType = "docs"
-	}
-
-	return commitType, "", message
-}
-
 func getStatusIcon(status string) string {
 	switch status {
 	case "A":
-		return "➕ A"
+		return "➕"
 	case "M":
-		return "📝 M"
+		return "📝"
 	case "D":
-		return "🗑️ D"
+		return "🗑️"
 	case "R":
-		return "📛 R"
+		return "📛"
 	case "C":
-		return "📋 C"
+		return "📋"
 	case "U":
-		return "⚠️ U"
+		return "⚠️"
 	case "??":
-		return "❓ ??"
+		return "❓"
 	default:
-		return status
+		return "📄"
 	}
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }
