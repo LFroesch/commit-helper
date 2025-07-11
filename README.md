@@ -7,8 +7,11 @@ A simple, user-friendly terminal UI for creating git commits with smart suggesti
 - **Simple Interface**: Clean, intuitive design with three main modes
 - **Smart Suggestions**: Analyzes git diffs, file content, and patterns to suggest contextual commit messages
 - **Function Detection**: Recognizes when you add/modify functions and suggests specific messages
+- **Conventional Commits**: Automatic formatting using conventional commit standards (type(scope): description)
+- **Commit Hook Management**: Install/remove git hooks to enforce commit message validation
 - **Quick Actions**: One-key shortcuts for common git operations
-- **Custom Messages**: Easy custom commit message input
+- **Custom Messages**: Easy custom commit message input with validation
+- **Error Prevention**: Validates workflows and shows helpful error messages
 
 ## 🎯 How to Use
 
