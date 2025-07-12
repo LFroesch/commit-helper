@@ -258,6 +258,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "custom":
 				if m.customInput.Value() != "" {
 					msg := m.customInput.Value()
+					// Clear the input and go back to files mode after commit
+					m.customInput.SetValue("")
+					m.customInput.Blur()
+					m.state = "files"
+
 					if !m.validateCommitMessage(msg) {
 						// Show warning but still allow commit
 						return m, tea.Batch(
@@ -347,9 +352,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.checkHookStatus()
 
 			case "?":
-				// Show help about the commit hook
+				// Show valid commit message format status
 				return m, func() tea.Msg {
-					return statusMsg{message: "📋 h: install hook • H: remove hook • i: hook info • ?: help"}
+					return statusMsg{message: "� Valid formats: feat(scope): description | fix: description | docs/test/chore: description"}
 				}
 			}
 		}
@@ -473,7 +478,7 @@ func (m model) View() string {
 			actionStyle.Render("hook info"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("?"),
-			actionStyle.Render("help"),
+			actionStyle.Render("format"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("q"),
 			actionStyle.Render("quit"))
@@ -500,7 +505,7 @@ func (m model) View() string {
 			actionStyle.Render("hook mgmt"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("i/?"),
-			actionStyle.Render("info/help"),
+			actionStyle.Render("info/format"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("q"),
 			actionStyle.Render("quit"))
@@ -652,9 +657,9 @@ func (m model) commitWithMessage(message string) tea.Cmd {
 		cmd.Dir = m.repoPath
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
 
-		output, err := cmd.CombinedOutput()
+		_, err = cmd.CombinedOutput()
 		if err != nil {
-			return statusMsg{message: fmt.Sprintf("❌ Commit failed: %v - %s", err, string(output))}
+			return statusMsg{message: "❌ Commit failed - Valid formats: feat(scope): description | fix: description | docs/test/chore: description"}
 		}
 
 		return statusMsg{message: fmt.Sprintf("✅ Committed: %s", message)}
