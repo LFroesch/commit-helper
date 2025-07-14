@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,10 +30,20 @@ type CommitSuggestion struct {
 	Type    string
 }
 
+type GitStatus struct {
+	Branch        string
+	Clean         bool
+	StagedFiles   int
+	UnstagedFiles int
+	Ahead         int
+	Behind        int
+}
+
 type model struct {
-	state       string // "files", "suggestions", "custom", "edit"
+	state       string // "files", "suggestions", "custom", "edit", "output"
 	changes     []GitChange
 	suggestions []CommitSuggestion
+	gitState    GitStatus
 
 	filesTable       table.Model
 	suggestionsTable table.Model
@@ -44,7 +55,9 @@ type model struct {
 	statusMsg    string
 	statusExpiry time.Time
 
-	repoPath string
+	repoPath   string
+	pushOutput string
+	lastCommit string
 }
 
 type statusMsg struct {
@@ -53,6 +66,11 @@ type statusMsg struct {
 
 type gitChangesMsg []GitChange
 type commitSuggestionsMsg []CommitSuggestion
+type gitStatusMsg GitStatus
+type pushOutputMsg struct {
+	output string
+	commit string
+}
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -71,7 +89,20 @@ var (
 func main() {
 	repoPath, err := findGitRepo()
 	if err != nil {
-		log.Fatal("Error: Not in a git repository")
+		// Offer to initialize git repository
+		fmt.Println("❌ Not in a git repository.")
+		fmt.Print("Would you like to initialize a git repository here? (y/N): ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
+			if err := initGitRepo(); err != nil {
+				log.Fatal("Failed to initialize git repository:", err)
+			}
+			fmt.Println("✅ Git repository initialized successfully!")
+			repoPath, _ = findGitRepo()
+		} else {
+			log.Fatal("Error: Not in a git repository")
+		}
 	}
 
 	m := model{
@@ -149,10 +180,17 @@ func findGitRepo() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+func initGitRepo() error {
+	cmd := exec.Command("git", "init")
+	_, err := cmd.CombinedOutput()
+	return err
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		tea.SetWindowTitle("Git Commit Helper"),
 		m.loadGitChanges(),
+		m.loadGitStatus(),
 		m.checkHookStatusOnStartup(),
 	)
 }
@@ -202,10 +240,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Auto-generate suggestions
 		cmds = append(cmds, m.generateSuggestions())
+		// Refresh git status
+		cmds = append(cmds, m.loadGitStatus())
 		m.statusMsg = fmt.Sprintf("✅ Loaded %d changed files", len(m.changes))
 		m.statusExpiry = time.Now().Add(3 * time.Second)
 
 		return m, tea.Batch(cmds...)
+
+	case gitStatusMsg:
+		m.gitState = GitStatus(msg)
+		return m, nil
+
+	case pushOutputMsg:
+		m.pushOutput = msg.output
+		m.lastCommit = msg.commit
+		m.state = "output"
+		m.statusMsg = "✅ Push completed - check tab 4 for details"
+		m.statusExpiry = time.Now().Add(5 * time.Second)
+		return m, nil
 
 	case commitSuggestionsMsg:
 		m.suggestions = []CommitSuggestion(msg)
@@ -267,12 +319,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Show warning but still allow commit
 						return m, tea.Batch(
 							m.commitWithMessage(msg),
+							m.refreshAfterCommit(),
 							func() tea.Msg {
 								return statusMsg{message: "⚠️ Commit message doesn't follow conventional format"}
 							},
 						)
 					}
-					return m, m.commitWithMessage(msg)
+					return m, tea.Batch(
+						m.commitWithMessage(msg),
+						m.refreshAfterCommit(),
+					)
 				}
 			case "edit":
 				if m.editInput.Value() != "" {
@@ -281,12 +337,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Show warning but still allow commit
 						return m, tea.Batch(
 							m.commitWithMessage(msg),
+							m.refreshAfterCommit(),
 							func() tea.Msg {
 								return statusMsg{message: "⚠️ Commit message doesn't follow conventional format"}
 							},
 						)
 					}
-					return m, m.commitWithMessage(msg)
+					return m, tea.Batch(
+						m.commitWithMessage(msg),
+						m.refreshAfterCommit(),
+					)
 				}
 			}
 			return m, nil
@@ -334,13 +394,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 
 			case "a":
-				return m, m.gitAddAll()
+				return m, tea.Batch(
+					m.gitAddAll(),
+					m.refreshAfterCommit(),
+				)
 
 			case "p":
 				return m, m.gitPush()
 
 			case "s":
 				return m, m.gitStatus()
+
+			case "R":
+				// Git reset (unstage all)
+				return m, tea.Batch(
+					m.gitReset(),
+					m.refreshAfterCommit(),
+				)
+
+			case "A":
+				// Git commit --amend
+				return m, tea.Batch(
+					m.gitAmend(),
+					m.refreshAfterCommit(),
+				)
+
+			case "4":
+				m.state = "output"
+				return m, nil
 
 			case "h":
 				return m, m.generateCommitHook()
@@ -370,6 +451,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.customInput, cmd = m.customInput.Update(msg)
 	case "edit":
 		m.editInput, cmd = m.editInput.Update(msg)
+	case "output":
+		// Output view doesn't need input handling
+		break
 	}
 
 	return m, cmd
@@ -389,10 +473,14 @@ func (m model) View() string {
 	title := titleStyle.Render("🚀 Git Commit Helper")
 	repoInfo := repositoryStyle.Render(fmt.Sprintf(" Repository: %s%s", filepath.Base(m.repoPath), hookStatus))
 
+	// Create git status bar
+	gitStatusBar := m.renderGitStatusBar()
+
 	// Create tabs
 	tab1 := m.renderTab("1", "📁 Files", m.state == "files")
 	tab2 := m.renderTab("2", "💡 Suggestions", m.state == "suggestions")
 	tab3 := m.renderTab("3", "✏️  Custom", m.state == "custom")
+	tab4 := m.renderTab("4", "📤 Output", m.state == "output")
 
 	// Calculate spacing to keep everything on one line
 	spacer := strings.Repeat(" ", 2)
@@ -406,6 +494,14 @@ func (m model) View() string {
 		tab1,
 		tab2,
 		tab3,
+		tab4,
+	)
+
+	// Combine header with git status
+	header := lipgloss.JoinVertical(
+		lipgloss.Left,
+		fullHeader,
+		gitStatusBar,
 	)
 
 	// Content based on current state
@@ -441,6 +537,23 @@ func (m model) View() string {
 			Foreground(lipgloss.Color("86")).
 			Render("Edit Commit Message:")
 		content = fmt.Sprintf("%s\n\n%s", inputLabel, m.editInput.View())
+
+	case "output":
+		if m.pushOutput != "" {
+			outputLabel := lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("86")).
+				Render("Git Push Output:")
+			commitLabel := lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("208")).
+				Render("Last Commit:")
+			content = fmt.Sprintf("%s\n\n%s\n\n%s\n%s", outputLabel, m.pushOutput, commitLabel, m.lastCommit)
+		} else {
+			content = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Render("No push output available. Use 'p' to push changes.")
+		}
 	}
 
 	// Footer with help and status
@@ -453,8 +566,8 @@ func (m model) View() string {
 
 	switch m.state {
 	case "files":
-		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s\n%s: %s %s %s: %s %s %s: %s",
-			keyStyle.Render("1-3"),
+		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s \n%s %s: %s%s: %s %s %s: %s %s %s: %s ",
+			keyStyle.Render("1-4"),
 			actionStyle.Render("switch"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("↑↓"),
@@ -466,25 +579,25 @@ func (m model) View() string {
 			keyStyle.Render("a"),
 			actionStyle.Render("add"),
 			bulletStyle.Render("•"),
+			keyStyle.Render("R"),
+			actionStyle.Render("reset"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("A"),
+			actionStyle.Render("amend"),
 			keyStyle.Render("s"),
 			actionStyle.Render("status"),
 			bulletStyle.Render("•"),
-			keyStyle.Render("h"),
-			actionStyle.Render("install hook"),
+			keyStyle.Render("h/H"),
+			actionStyle.Render("hooks"),
 			bulletStyle.Render("•"),
-			keyStyle.Render("H"),
-			actionStyle.Render("remove hook"),
-			keyStyle.Render("i"),
-			actionStyle.Render("hook info"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("?"),
-			actionStyle.Render("format"),
+			keyStyle.Render("i/?"),
+			actionStyle.Render("info"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("q"),
 			actionStyle.Render("quit"))
 	case "suggestions":
 		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s\n%s: %s %s %s: %s %s %s: %s",
-			keyStyle.Render("1-3"),
+			keyStyle.Render("1-4"),
 			actionStyle.Render("switch"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("↑↓"),
@@ -496,16 +609,16 @@ func (m model) View() string {
 			keyStyle.Render("e"),
 			actionStyle.Render("edit"),
 			bulletStyle.Render("•"),
-			keyStyle.Render("a"),
-			actionStyle.Render("add"),
+			keyStyle.Render("a/R/A"),
+			actionStyle.Render("add/reset/amend"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("p"),
 			actionStyle.Render("push"),
 			keyStyle.Render("h/H"),
-			actionStyle.Render("hook mgmt"),
+			actionStyle.Render("hooks"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("i/?"),
-			actionStyle.Render("info/format"),
+			actionStyle.Render("info"),
 			bulletStyle.Render("•"),
 			keyStyle.Render("q"),
 			actionStyle.Render("quit"))
@@ -523,6 +636,13 @@ func (m model) View() string {
 			bulletStyle.Render("•"),
 			keyStyle.Render("esc"),
 			actionStyle.Render("back to suggestions"))
+	case "output":
+		footer = fmt.Sprintf("%s: %s %s %s: %s",
+			keyStyle.Render("1-4"),
+			actionStyle.Render("switch tabs"),
+			bulletStyle.Render("•"),
+			keyStyle.Render("q"),
+			actionStyle.Render("quit"))
 	}
 
 	// Add status message if present
@@ -540,7 +660,7 @@ func (m model) View() string {
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
-		fullHeader,
+		header,
 		"",
 		content,
 		"",
@@ -563,20 +683,57 @@ func (m model) renderTab(key, label string, active bool) string {
 	return style.Render(fmt.Sprintf("[%s] %s", key, label))
 }
 
+func (m model) renderGitStatusBar() string {
+	// Status indicators
+	cleanIcon := "✅"
+	dirtyIcon := "🔴"
+	aheadIcon := "⬆️"
+	behindIcon := "⬇️"
+	stagedIcon := "🟢"
+	emptyIcon := "⚪"
+
+	// Branch info
+	branchStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	branchInfo := branchStyle.Render(fmt.Sprintf("Branch: %s", m.gitState.Branch))
+
+	// Staging status - always show this
+	var stagingStatus string
+	if m.gitState.StagedFiles == 0 {
+		stagingStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("%s Nothing staged", emptyIcon))
+	} else {
+		stagingStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render(fmt.Sprintf("%s %d files staged", stagedIcon, m.gitState.StagedFiles))
+	}
+
+	// Working directory status - always show this
+	var workingDirStatus string
+	if m.gitState.Clean {
+		workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render(fmt.Sprintf("%s WD clean", cleanIcon))
+	} else {
+		if m.gitState.UnstagedFiles > 0 {
+			workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("%s WD dirty (%d files)", dirtyIcon, m.gitState.UnstagedFiles))
+		} else {
+			workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("%s WD dirty", dirtyIcon))
+		}
+	}
+
+	// Ahead/behind info
+	var syncInfo []string
+	if m.gitState.Ahead > 0 {
+		syncInfo = append(syncInfo, lipgloss.NewStyle().Foreground(lipgloss.Color("117")).Render(fmt.Sprintf("%s %d ahead", aheadIcon, m.gitState.Ahead)))
+	}
+	if m.gitState.Behind > 0 {
+		syncInfo = append(syncInfo, lipgloss.NewStyle().Foreground(lipgloss.Color("173")).Render(fmt.Sprintf("%s %d behind", behindIcon, m.gitState.Behind)))
+	}
+
+	// Combine all elements - always show branch, staging, and working dir status
+	elements := []string{branchInfo, stagingStatus, workingDirStatus}
+	elements = append(elements, syncInfo...)
+
+	return lipgloss.NewStyle().Background(lipgloss.Color("235")).Padding(0, 1).Render(strings.Join(elements, " • "))
+}
+
 func (m model) gitAddAll() tea.Cmd {
 	return func() tea.Msg {
-		// Check if there are any changes to stage
-		statusCmd := exec.Command("git", "status", "--porcelain")
-		statusCmd.Dir = m.repoPath
-		statusOutput, err := statusCmd.Output()
-		if err != nil {
-			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
-		}
-
-		if len(strings.TrimSpace(string(statusOutput))) == 0 {
-			return statusMsg{message: "ℹ️ No changes to stage"}
-		}
-
 		cmd := exec.Command("git", "add", ".")
 		cmd.Dir = m.repoPath
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
@@ -605,6 +762,18 @@ func (m model) gitPush() tea.Cmd {
 			return statusMsg{message: "ℹ️ No commits to push"}
 		}
 
+		// Get last commit info before push
+		commitCmd := exec.Command("git", "log", "-1", "--oneline")
+		commitCmd.Dir = m.repoPath
+		commitOutput, _ := commitCmd.Output()
+		lastCommit := strings.TrimSpace(string(commitOutput))
+
+		// Get list of changed files in last commit
+		filesCmd := exec.Command("git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+		filesCmd.Dir = m.repoPath
+		filesOutput, _ := filesCmd.Output()
+		changedFiles := strings.TrimSpace(string(filesOutput))
+
 		cmd := exec.Command("git", "push")
 		cmd.Dir = m.repoPath
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
@@ -614,7 +783,13 @@ func (m model) gitPush() tea.Cmd {
 			return statusMsg{message: fmt.Sprintf("❌ Git push failed: %v - %s", err, string(output))}
 		}
 
-		return statusMsg{message: "✅ Pushed to remote repository"}
+		// Format detailed output
+		detailedOutput := fmt.Sprintf("Push Output:\n%s\n\nLast Commit:\n%s\n\nChanged Files:\n%s", string(output), lastCommit, changedFiles)
+
+		return pushOutputMsg{
+			output: detailedOutput,
+			commit: lastCommit,
+		}
 	}
 }
 
@@ -664,6 +839,145 @@ func (m model) commitWithMessage(message string) tea.Cmd {
 
 		return statusMsg{message: fmt.Sprintf("✅ Committed: %s", message)}
 	}
+}
+
+func (m model) loadGitStatus() tea.Cmd {
+	return func() tea.Msg {
+		status := GitStatus{}
+
+		// Get branch name
+		branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = m.repoPath
+		branchOutput, err := branchCmd.Output()
+		if err == nil {
+			status.Branch = strings.TrimSpace(string(branchOutput))
+		} else {
+			status.Branch = "unknown"
+		}
+
+		// Check if working directory is clean
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = m.repoPath
+		statusOutput, err := statusCmd.Output()
+		if err == nil {
+			statusText := strings.TrimSpace(string(statusOutput))
+			lines := strings.Split(statusText, "\n")
+			status.Clean = statusText == ""
+
+			// Count staged and unstaged files more accurately
+			for _, line := range lines {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				if len(line) >= 2 {
+					stagedStatus := line[0]
+					unstagedStatus := line[1]
+
+					// Count staged files (index changes)
+					if stagedStatus != ' ' && stagedStatus != '?' {
+						status.StagedFiles++
+					}
+
+					// Count unstaged files (working tree changes)
+					if unstagedStatus != ' ' && unstagedStatus != '?' {
+						status.UnstagedFiles++
+					}
+				}
+			}
+		}
+
+		// Check ahead/behind status
+		aheadBehindCmd := exec.Command("git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+		aheadBehindCmd.Dir = m.repoPath
+		aheadBehindOutput, err := aheadBehindCmd.Output()
+		if err == nil {
+			parts := strings.Fields(strings.TrimSpace(string(aheadBehindOutput)))
+			if len(parts) == 2 {
+				if ahead, err := strconv.Atoi(parts[0]); err == nil {
+					status.Ahead = ahead
+				}
+				if behind, err := strconv.Atoi(parts[1]); err == nil {
+					status.Behind = behind
+				}
+			}
+		}
+
+		return gitStatusMsg(status)
+	}
+}
+
+func (m model) gitReset() tea.Cmd {
+	return func() tea.Msg {
+		// Reset all staged files
+		cmd := exec.Command("git", "reset")
+		cmd.Dir = m.repoPath
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Git reset failed: %v - %s", err, string(output))}
+		}
+
+		return statusMsg{message: "✅ All staged changes reset"}
+	}
+}
+
+func (m model) gitAmend() tea.Cmd {
+	return func() tea.Msg {
+		// Check if there are any commits
+		logCmd := exec.Command("git", "log", "--oneline", "-1")
+		logCmd.Dir = m.repoPath
+		_, err := logCmd.Output()
+		if err != nil {
+			return statusMsg{message: "❌ No commits found to amend"}
+		}
+
+		// Get the current commit message
+		msgCmd := exec.Command("git", "log", "-1", "--pretty=%B")
+		msgCmd.Dir = m.repoPath
+		msgOutput, err := msgCmd.Output()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to get commit message: %v", err)}
+		}
+
+		currentMsg := strings.TrimSpace(string(msgOutput))
+
+		// Check if there are staged changes to include
+		stagedCmd := exec.Command("git", "diff", "--cached", "--name-only")
+		stagedCmd.Dir = m.repoPath
+		stagedOutput, err := stagedCmd.Output()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to check staged changes: %v", err)}
+		}
+
+		args := []string{"commit", "--amend"}
+		if len(strings.TrimSpace(string(stagedOutput))) == 0 {
+			// No staged changes, just amend message
+			args = append(args, "--no-edit")
+			return statusMsg{message: "ℹ️ No staged changes to amend. Use 'a' to stage files or edit commit message manually."}
+		}
+
+		// Amend with staged changes, keeping the same message
+		args = append(args, "-m", currentMsg)
+
+		cmd := exec.Command("git", args...)
+		cmd.Dir = m.repoPath
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Git amend failed: %v - %s", err, string(output))}
+		}
+
+		return statusMsg{message: "✅ Commit amended with staged changes"}
+	}
+}
+
+func (m model) refreshAfterCommit() tea.Cmd {
+	return tea.Batch(
+		m.loadGitChanges(),
+		m.loadGitStatus(),
+	)
 }
 
 func getGitChanges(repoPath string) ([]GitChange, error) {
