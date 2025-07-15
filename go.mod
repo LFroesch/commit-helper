@@ -1,4 +1,4 @@
-module commit-helper
+module git-helper
 
 go 1.23.3
 

@@ -55,9 +55,10 @@ type model struct {
 	statusMsg    string
 	statusExpiry time.Time
 
-	repoPath   string
-	pushOutput string
-	lastCommit string
+	repoPath         string
+	pushOutput       string
+	lastCommit       string
+	lastStatusUpdate time.Time
 }
 
 type statusMsg struct {
@@ -186,6 +187,40 @@ func initGitRepo() error {
 	return err
 }
 
+// executeGitCommand runs a git command with retry logic to handle index.lock conflicts
+func executeGitCommand(repoPath string, args ...string) ([]byte, error) {
+	maxRetries := 3
+	retryDelay := 100 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Check for index.lock file before attempting operation
+		lockFile := filepath.Join(repoPath, ".git", "index.lock")
+		if _, err := os.Stat(lockFile); err == nil {
+			// Lock file exists, wait and retry
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoPath
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+
+		output, err := cmd.CombinedOutput()
+
+		// Check if error is due to index.lock
+		if err != nil && strings.Contains(string(output), "index.lock") {
+			// Wait before retry
+			time.Sleep(retryDelay)
+			retryDelay *= 2 // Exponential backoff
+			continue
+		}
+
+		return output, err
+	}
+
+	return nil, fmt.Errorf("git command failed after %d retries: index.lock conflict", maxRetries)
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		tea.SetWindowTitle("Git Commit Helper"),
@@ -240,8 +275,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Auto-generate suggestions
 		cmds = append(cmds, m.generateSuggestions())
-		// Refresh git status
-		cmds = append(cmds, m.loadGitStatus())
+
+		// Only refresh git status if enough time has passed (debounce)
+		if time.Since(m.lastStatusUpdate) > 2*time.Second {
+			cmds = append(cmds, m.loadGitStatus())
+			m.lastStatusUpdate = time.Now()
+		}
+
 		m.statusMsg = fmt.Sprintf("✅ Loaded %d changed files", len(m.changes))
 		m.statusExpiry = time.Now().Add(3 * time.Second)
 
@@ -386,6 +426,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "r":
+				// Reset the status update timer to allow immediate refresh
+				m.lastStatusUpdate = time.Time{}
 				return m, tea.Batch(
 					m.loadGitChanges(),
 					func() tea.Msg {
@@ -394,6 +436,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 
 			case "a":
+				// Reset timer to ensure immediate refresh
+				m.lastStatusUpdate = time.Time{}
 				return m, tea.Batch(
 					m.gitAddAll(),
 					m.refreshAfterCommit(),
@@ -406,14 +450,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.gitStatus()
 
 			case "R":
-				// Git reset (unstage all)
+				// Git reset (unstage all) - reset timer to ensure immediate refresh
+				m.lastStatusUpdate = time.Time{}
 				return m, tea.Batch(
 					m.gitReset(),
 					m.refreshAfterCommit(),
 				)
 
 			case "A":
-				// Git commit --amend
+				// Git commit --amend - reset timer to ensure immediate refresh
+				m.lastStatusUpdate = time.Time{}
 				return m, tea.Batch(
 					m.gitAmend(),
 					m.refreshAfterCommit(),
@@ -734,16 +780,46 @@ func (m model) renderGitStatusBar() string {
 
 func (m model) gitAddAll() tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("git", "add", ".")
-		cmd.Dir = m.repoPath
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+		// Check if there are unstaged files first
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = m.repoPath
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
+		}
 
-		output, err := cmd.CombinedOutput()
+		statusText := strings.TrimSpace(string(statusOutput))
+		if statusText == "" {
+			return statusMsg{message: "ℹ️ No changes to stage"}
+		}
+
+		// Count unstaged files
+		lines := strings.Split(statusText, "\n")
+		unstagedCount := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if len(line) >= 2 {
+				stagedStatus := line[0]
+				unstagedStatus := line[1]
+				// Count files that have unstaged changes or are untracked
+				if unstagedStatus != ' ' || stagedStatus == '?' {
+					unstagedCount++
+				}
+			}
+		}
+
+		if unstagedCount == 0 {
+			return statusMsg{message: "ℹ️ No unstaged changes to add"}
+		}
+
+		output, err := executeGitCommand(m.repoPath, "add", ".")
 		if err != nil {
 			return statusMsg{message: fmt.Sprintf("❌ Git add failed: %v - %s", err, string(output))}
 		}
 
-		return statusMsg{message: "✅ All changes staged (git add .)"}
+		return statusMsg{message: fmt.Sprintf("✅ Added %d file(s) to staging", unstagedCount)}
 	}
 }
 
@@ -828,11 +904,7 @@ func (m model) commitWithMessage(message string) tea.Cmd {
 			return statusMsg{message: "❌ No staged changes to commit. Use 'a' to stage files first."}
 		}
 
-		cmd := exec.Command("git", "commit", "-m", message)
-		cmd.Dir = m.repoPath
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
-
-		_, err = cmd.CombinedOutput()
+		_, err = executeGitCommand(m.repoPath, "commit", "-m", message)
 		if err != nil {
 			return statusMsg{message: "❌ Commit failed - Valid formats: feat(scope): description | fix: description | docs/test/chore: description"}
 		}
@@ -865,6 +937,7 @@ func (m model) loadGitStatus() tea.Cmd {
 			status.Clean = statusText == ""
 
 			// Count staged and unstaged files more accurately
+			// Count staged and unstaged files more accurately
 			for _, line := range lines {
 				if strings.TrimSpace(line) == "" {
 					continue
@@ -873,14 +946,16 @@ func (m model) loadGitStatus() tea.Cmd {
 					stagedStatus := line[0]
 					unstagedStatus := line[1]
 
-					// Count staged files (index changes)
+					// Count staged files: first column not space and not untracked
 					if stagedStatus != ' ' && stagedStatus != '?' {
 						status.StagedFiles++
 					}
 
-					// Count unstaged files (working tree changes)
-					if unstagedStatus != ' ' && unstagedStatus != '?' {
+					// Count unstaged files: second column not space OR untracked files
+					if unstagedStatus != ' ' {
 						status.UnstagedFiles++
+					} else if stagedStatus == '?' {
+						status.UnstagedFiles++ // untracked files show as ??
 					}
 				}
 			}
@@ -908,17 +983,28 @@ func (m model) loadGitStatus() tea.Cmd {
 
 func (m model) gitReset() tea.Cmd {
 	return func() tea.Msg {
-		// Reset all staged files
-		cmd := exec.Command("git", "reset")
-		cmd.Dir = m.repoPath
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+		// Check if there are staged files first
+		statusCmd := exec.Command("git", "diff", "--cached", "--name-only")
+		statusCmd.Dir = m.repoPath
+		statusOutput, err := statusCmd.Output()
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("❌ Failed to check staged files: %v", err)}
+		}
 
-		output, err := cmd.CombinedOutput()
+		stagedFiles := strings.TrimSpace(string(statusOutput))
+		if stagedFiles == "" {
+			return statusMsg{message: "ℹ️ No staged changes to reset"}
+		}
+
+		// Count staged files
+		stagedCount := len(strings.Split(stagedFiles, "\n"))
+
+		// Reset all staged files
+		output, err := executeGitCommand(m.repoPath, "reset", "HEAD")
 		if err != nil {
 			return statusMsg{message: fmt.Sprintf("❌ Git reset failed: %v - %s", err, string(output))}
 		}
-
-		return statusMsg{message: "✅ All staged changes reset"}
+		return statusMsg{message: fmt.Sprintf("✅ Reset %d staged file(s)", stagedCount)}
 	}
 }
 
@@ -973,19 +1059,18 @@ func (m model) gitAmend() tea.Cmd {
 	}
 }
 
-func (m model) refreshAfterCommit() tea.Cmd {
+// Make sure this function forces immediate git status refresh
+func (m *model) refreshAfterCommit() tea.Cmd {
+	// Reset status update timer to allow immediate refresh after operations
+	m.lastStatusUpdate = time.Time{}
 	return tea.Batch(
+		m.loadGitStatus(), // Load git status first for immediate UI update
 		m.loadGitChanges(),
-		m.loadGitStatus(),
 	)
 }
 
 func getGitChanges(repoPath string) ([]GitChange, error) {
-	cmd := exec.Command("git", "status", "--porcelain")
-	cmd.Dir = repoPath
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
-
-	output, err := cmd.Output()
+	output, err := executeGitCommand(repoPath, "status", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
@@ -1697,13 +1782,13 @@ func (m model) generateCommitHook() tea.Cmd {
 		}
 
 		hookContent := `#!/bin/bash
-# Git commit message hook generated by commit-helper
+# Git commit message hook generated by git-helper
 # Enforces conventional commit format: type(scope): description
 # 
 # Valid types: feat, fix, docs, style, refactor, test, chore
 # Example: feat(auth): add user authentication
 # 
-# This hook can be removed by deleting this file or using commit-helper
+# This hook can be removed by deleting this file or using git-helper
 
 commit_regex='^(feat|fix|docs|style|refactor|test|chore)(\(.+\))?: .{1,50}'
 
@@ -1730,7 +1815,7 @@ Your commit message:
 $(cat $1)
 
 To disable this check, delete: .git/hooks/commit-msg
-Or use the commit-helper tool (H key to remove)"
+Or use the git-helper tool (H key to remove)"
 
 if ! grep -qE "$commit_regex" "$1"; then
     echo "$error_msg" >&2
