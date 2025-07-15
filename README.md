@@ -42,6 +42,7 @@ A simple, user-friendly terminal UI for creating git commits with smart suggesti
 - `s` - Git status check
 - `r` - Refresh/reload changes
 - `q` - Quit
+test
 
 ### Navigation:
 - `1`, `2`, `3` - Switch between modes

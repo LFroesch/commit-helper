@@ -603,106 +603,7 @@ func (m model) View() string {
 	}
 
 	// Footer with help and status
-	var footer string
-
-	// Color styles for footer
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))     // Blue color for keys
-	actionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86"))  // Green color for action text
-	bulletStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // Gray color for bullets
-
-	switch m.state {
-	case "files":
-		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s \n%s %s: %s%s: %s %s %s: %s %s %s: %s ",
-			keyStyle.Render("1-4"),
-			actionStyle.Render("switch"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("↑↓"),
-			actionStyle.Render("navigate"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("r"),
-			actionStyle.Render("refresh"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("a"),
-			actionStyle.Render("add"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("R"),
-			actionStyle.Render("reset"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("A"),
-			actionStyle.Render("amend"),
-			keyStyle.Render("s"),
-			actionStyle.Render("status"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("h/H"),
-			actionStyle.Render("hooks"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("i/?"),
-			actionStyle.Render("info"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("q"),
-			actionStyle.Render("quit"))
-	case "suggestions":
-		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s\n%s: %s %s %s: %s %s %s: %s",
-			keyStyle.Render("1-4"),
-			actionStyle.Render("switch"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("↑↓"),
-			actionStyle.Render("navigate"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("enter"),
-			actionStyle.Render("commit"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("e"),
-			actionStyle.Render("edit"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("a/R/A"),
-			actionStyle.Render("add/reset/amend"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("p"),
-			actionStyle.Render("push"),
-			keyStyle.Render("h/H"),
-			actionStyle.Render("hooks"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("i/?"),
-			actionStyle.Render("info"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("q"),
-			actionStyle.Render("quit"))
-	case "custom":
-		footer = fmt.Sprintf("%s: %s %s %s: %s",
-			keyStyle.Render("enter"),
-			actionStyle.Render("commit"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("esc"),
-			actionStyle.Render("cancel"))
-	case "edit":
-		footer = fmt.Sprintf("%s: %s %s %s: %s",
-			keyStyle.Render("enter"),
-			actionStyle.Render("commit"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("esc"),
-			actionStyle.Render("back to suggestions"))
-	case "output":
-		footer = fmt.Sprintf("%s: %s %s %s: %s",
-			keyStyle.Render("1-4"),
-			actionStyle.Render("switch tabs"),
-			bulletStyle.Render("•"),
-			keyStyle.Render("q"),
-			actionStyle.Render("quit"))
-	}
-
-	// Add status message if present
-	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
-		var statusColor lipgloss.Color = "86"
-		if strings.Contains(m.statusMsg, "❌") {
-			statusColor = "196"
-		}
-		statusLine := lipgloss.NewStyle().
-			Foreground(statusColor).
-			Bold(true).
-			Render(" > " + m.statusMsg)
-		footer = footer + "\n" + statusLine
-	}
+	footer := m.renderFooter()
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -729,6 +630,67 @@ func (m model) renderTab(key, label string, active bool) string {
 	return style.Render(fmt.Sprintf("[%s] %s", key, label))
 }
 
+func (m model) renderFooter() string {
+	// Color styles for footer
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))     // Blue color for keys
+	actionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86"))  // Green color for action text
+	bulletStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // Gray color for bullets
+
+	var footer string
+	switch m.state {
+	case "files":
+		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s \n%s %s: %s%s: %s %s %s: %s %s %s: %s ",
+			keyStyle.Render("1-4"), actionStyle.Render("switch"), bulletStyle.Render("•"),
+			keyStyle.Render("↑↓"), actionStyle.Render("navigate"), bulletStyle.Render("•"),
+			keyStyle.Render("r"), actionStyle.Render("refresh"), bulletStyle.Render("•"),
+			keyStyle.Render("a"), actionStyle.Render("add"), bulletStyle.Render("•"),
+			keyStyle.Render("R"), actionStyle.Render("reset"), bulletStyle.Render("•"),
+			keyStyle.Render("A"), actionStyle.Render("amend"),
+			keyStyle.Render("s"), actionStyle.Render("status"), bulletStyle.Render("•"),
+			keyStyle.Render("h/H"), actionStyle.Render("hooks"), bulletStyle.Render("•"),
+			keyStyle.Render("i/?"), actionStyle.Render("info"), bulletStyle.Render("•"),
+			keyStyle.Render("q"), actionStyle.Render("quit"))
+	case "suggestions":
+		footer = fmt.Sprintf("%s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s %s %s: %s\n%s: %s %s %s: %s %s %s: %s",
+			keyStyle.Render("1-4"), actionStyle.Render("switch"), bulletStyle.Render("•"),
+			keyStyle.Render("↑↓"), actionStyle.Render("navigate"), bulletStyle.Render("•"),
+			keyStyle.Render("enter"), actionStyle.Render("commit"), bulletStyle.Render("•"),
+			keyStyle.Render("e"), actionStyle.Render("edit"), bulletStyle.Render("•"),
+			keyStyle.Render("a/R/A"), actionStyle.Render("add/reset/amend"), bulletStyle.Render("•"),
+			keyStyle.Render("p"), actionStyle.Render("push"),
+			keyStyle.Render("h/H"), actionStyle.Render("hooks"), bulletStyle.Render("•"),
+			keyStyle.Render("i/?"), actionStyle.Render("info"), bulletStyle.Render("•"),
+			keyStyle.Render("q"), actionStyle.Render("quit"))
+	case "custom":
+		footer = fmt.Sprintf("%s: %s %s %s: %s",
+			keyStyle.Render("enter"), actionStyle.Render("commit"), bulletStyle.Render("•"),
+			keyStyle.Render("esc"), actionStyle.Render("cancel"))
+	case "edit":
+		footer = fmt.Sprintf("%s: %s %s %s: %s",
+			keyStyle.Render("enter"), actionStyle.Render("commit"), bulletStyle.Render("•"),
+			keyStyle.Render("esc"), actionStyle.Render("back to suggestions"))
+	case "output":
+		footer = fmt.Sprintf("%s: %s %s %s: %s",
+			keyStyle.Render("1-4"), actionStyle.Render("switch tabs"), bulletStyle.Render("•"),
+			keyStyle.Render("q"), actionStyle.Render("quit"))
+	}
+
+	// Add status message if present
+	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
+		var statusColor lipgloss.Color = "86"
+		if strings.Contains(m.statusMsg, "❌") {
+			statusColor = "196"
+		}
+		statusLine := lipgloss.NewStyle().
+			Foreground(statusColor).
+			Bold(true).
+			Render(" > " + m.statusMsg)
+		footer = footer + "\n" + statusLine
+	}
+
+	return footer
+}
+
 func (m model) renderGitStatusBar() string {
 	// Status indicators
 	cleanIcon := "✅"
@@ -750,16 +712,12 @@ func (m model) renderGitStatusBar() string {
 		stagingStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render(fmt.Sprintf("%s %d files staged", stagedIcon, m.gitState.StagedFiles))
 	}
 
-	// Working directory status - always show this
+	// Working directory status - only show dirty if there are unstaged files
 	var workingDirStatus string
-	if m.gitState.Clean {
-		workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render(fmt.Sprintf("%s WD clean", cleanIcon))
+	if m.gitState.UnstagedFiles > 0 {
+		workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("%s WD dirty (%d files)", dirtyIcon, m.gitState.UnstagedFiles))
 	} else {
-		if m.gitState.UnstagedFiles > 0 {
-			workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("%s WD dirty (%d files)", dirtyIcon, m.gitState.UnstagedFiles))
-		} else {
-			workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("%s WD dirty", dirtyIcon))
-		}
+		workingDirStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render(fmt.Sprintf("%s WD clean", cleanIcon))
 	}
 
 	// Ahead/behind info
@@ -780,7 +738,7 @@ func (m model) renderGitStatusBar() string {
 
 func (m model) gitAddAll() tea.Cmd {
 	return func() tea.Msg {
-		// Check if there are unstaged files first
+		// Check current status
 		statusCmd := exec.Command("git", "status", "--porcelain")
 		statusCmd.Dir = m.repoPath
 		statusOutput, err := statusCmd.Output()
@@ -793,23 +751,8 @@ func (m model) gitAddAll() tea.Cmd {
 			return statusMsg{message: "ℹ️ No changes to stage"}
 		}
 
-		// Count unstaged files
-		lines := strings.Split(statusText, "\n")
-		unstagedCount := 0
-		for _, line := range lines {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			if len(line) >= 2 {
-				stagedStatus := line[0]
-				unstagedStatus := line[1]
-				// Count files that have unstaged changes or are untracked
-				if unstagedStatus != ' ' || stagedStatus == '?' {
-					unstagedCount++
-				}
-			}
-		}
-
+		// Count unstaged files using shared logic
+		_, unstagedCount, _ := parseGitStatusOutput(statusText)
 		if unstagedCount == 0 {
 			return statusMsg{message: "ℹ️ No unstaged changes to add"}
 		}
@@ -913,69 +856,96 @@ func (m model) commitWithMessage(message string) tea.Cmd {
 	}
 }
 
+func parseGitStatusOutput(statusText string) (stagedFiles, unstagedFiles int, clean bool) {
+	// Debug logging to file
+	f, _ := os.OpenFile("/tmp/git-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	defer f.Close()
+	fmt.Fprintf(f, "\n=== parseGitStatusOutput called ===\n")
+	fmt.Fprintf(f, "Raw status text: %q\n", statusText)
+
+	clean = statusText == ""
+	if clean {
+		return 0, 0, true
+	}
+
+	lines := strings.Split(statusText, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) >= 2 {
+			stagedStatus := line[0]
+			unstagedStatus := line[1]
+
+			fmt.Fprintf(f, "Line %d: %q -> staged='%c' unstaged='%c'\n", i, line, stagedStatus, unstagedStatus)
+
+			// Count staged files: first column shows staged changes (not space, not untracked)
+			if stagedStatus != ' ' && stagedStatus != '?' {
+				stagedFiles++
+				fmt.Fprintf(f, "  -> Counted as STAGED (total: %d)\n", stagedFiles)
+			}
+
+			// Count unstaged files: second column shows unstaged changes
+			if unstagedStatus != ' ' {
+				unstagedFiles++
+				fmt.Fprintf(f, "  -> Counted as UNSTAGED (total: %d)\n", unstagedFiles)
+			}
+		}
+	}
+
+	fmt.Fprintf(f, "Final count: staged=%d, unstaged=%d\n", stagedFiles, unstagedFiles)
+	return stagedFiles, unstagedFiles, false
+}
+
+// getBranchName returns the current git branch name
+func getBranchName(repoPath string) string {
+	branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = repoPath
+	branchOutput, err := branchCmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(branchOutput))
+	}
+	return "unknown"
+}
+
+// getAheadBehindCount returns ahead/behind counts relative to upstream
+func getAheadBehindCount(repoPath string) (ahead, behind int) {
+	aheadBehindCmd := exec.Command("git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+	aheadBehindCmd.Dir = repoPath
+	aheadBehindOutput, err := aheadBehindCmd.Output()
+	if err == nil {
+		parts := strings.Fields(strings.TrimSpace(string(aheadBehindOutput)))
+		if len(parts) == 2 {
+			if a, err := strconv.Atoi(parts[0]); err == nil {
+				ahead = a
+			}
+			if b, err := strconv.Atoi(parts[1]); err == nil {
+				behind = b
+			}
+		}
+	}
+	return ahead, behind
+}
+
 func (m model) loadGitStatus() tea.Cmd {
 	return func() tea.Msg {
 		status := GitStatus{}
 
 		// Get branch name
-		branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-		branchCmd.Dir = m.repoPath
-		branchOutput, err := branchCmd.Output()
-		if err == nil {
-			status.Branch = strings.TrimSpace(string(branchOutput))
-		} else {
-			status.Branch = "unknown"
-		}
+		status.Branch = getBranchName(m.repoPath)
 
-		// Check if working directory is clean
+		// Check status and count files
 		statusCmd := exec.Command("git", "status", "--porcelain")
 		statusCmd.Dir = m.repoPath
 		statusOutput, err := statusCmd.Output()
 		if err == nil {
-			statusText := strings.TrimSpace(string(statusOutput))
-			lines := strings.Split(statusText, "\n")
-			status.Clean = statusText == ""
+			statusText := string(statusOutput)
 
-			// Count staged and unstaged files more accurately
-			// Count staged and unstaged files more accurately
-			for _, line := range lines {
-				if strings.TrimSpace(line) == "" {
-					continue
-				}
-				if len(line) >= 2 {
-					stagedStatus := line[0]
-					unstagedStatus := line[1]
-
-					// Count staged files: first column not space and not untracked
-					if stagedStatus != ' ' && stagedStatus != '?' {
-						status.StagedFiles++
-					}
-
-					// Count unstaged files: second column not space OR untracked files
-					if unstagedStatus != ' ' {
-						status.UnstagedFiles++
-					} else if stagedStatus == '?' {
-						status.UnstagedFiles++ // untracked files show as ??
-					}
-				}
-			}
+			status.StagedFiles, status.UnstagedFiles, status.Clean = parseGitStatusOutput(statusText)
 		}
 
 		// Check ahead/behind status
-		aheadBehindCmd := exec.Command("git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
-		aheadBehindCmd.Dir = m.repoPath
-		aheadBehindOutput, err := aheadBehindCmd.Output()
-		if err == nil {
-			parts := strings.Fields(strings.TrimSpace(string(aheadBehindOutput)))
-			if len(parts) == 2 {
-				if ahead, err := strconv.Atoi(parts[0]); err == nil {
-					status.Ahead = ahead
-				}
-				if behind, err := strconv.Atoi(parts[1]); err == nil {
-					status.Behind = behind
-				}
-			}
-		}
+		status.Ahead, status.Behind = getAheadBehindCount(m.repoPath)
 
 		return gitStatusMsg(status)
 	}
@@ -983,21 +953,20 @@ func (m model) loadGitStatus() tea.Cmd {
 
 func (m model) gitReset() tea.Cmd {
 	return func() tea.Msg {
-		// Check if there are staged files first
-		statusCmd := exec.Command("git", "diff", "--cached", "--name-only")
+		// Check current status to count staged files
+		statusCmd := exec.Command("git", "status", "--porcelain")
 		statusCmd.Dir = m.repoPath
 		statusOutput, err := statusCmd.Output()
 		if err != nil {
-			return statusMsg{message: fmt.Sprintf("❌ Failed to check staged files: %v", err)}
+			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
 		}
 
-		stagedFiles := strings.TrimSpace(string(statusOutput))
-		if stagedFiles == "" {
+		statusText := strings.TrimSpace(string(statusOutput))
+		stagedCount, _, _ := parseGitStatusOutput(statusText)
+
+		if stagedCount == 0 {
 			return statusMsg{message: "ℹ️ No staged changes to reset"}
 		}
-
-		// Count staged files
-		stagedCount := len(strings.Split(stagedFiles, "\n"))
 
 		// Reset all staged files
 		output, err := executeGitCommand(m.repoPath, "reset", "HEAD")
@@ -1063,10 +1032,16 @@ func (m model) gitAmend() tea.Cmd {
 func (m *model) refreshAfterCommit() tea.Cmd {
 	// Reset status update timer to allow immediate refresh after operations
 	m.lastStatusUpdate = time.Time{}
-	return tea.Batch(
-		m.loadGitStatus(), // Load git status first for immediate UI update
-		m.loadGitChanges(),
-	)
+	return func() tea.Msg {
+		// Small delay to ensure git index is fully updated before checking status
+		time.Sleep(50 * time.Millisecond)
+
+		// Force immediate status refresh by calling loadGitStatus directly
+		return tea.Batch(
+			m.loadGitStatus(),
+			m.loadGitChanges(),
+		)()
+	}
 }
 
 func getGitChanges(repoPath string) ([]GitChange, error) {
@@ -1087,7 +1062,7 @@ func getGitChanges(repoPath string) ([]GitChange, error) {
 			continue
 		}
 
-		status := strings.TrimSpace(line[:2])
+		status := (line[:2])
 		file := strings.TrimSpace(line[3:])
 
 		change := GitChange{
