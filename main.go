@@ -481,7 +481,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "?":
 				// Show valid commit message format status
 				return m, func() tea.Msg {
-					return statusMsg{message: "� Valid formats: feat(scope): description | fix: description | docs/test/chore: description"}
+					return statusMsg{message: "Valid formats: feat(scope): description | fix: description | docs/test/chore: description"}
 				}
 			}
 		}
@@ -574,7 +574,7 @@ func (m model) View() string {
 		inputLabel := lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("86")).
-			Render("Custom Commit Message:")
+			Render("Custom Commit Message:\nValid formats: feat(scope): description | fix: description | docs/test/chore: description")
 		content = fmt.Sprintf("%s\n\n%s", inputLabel, m.customInput.View())
 
 	case "edit":
@@ -738,31 +738,12 @@ func (m model) renderGitStatusBar() string {
 
 func (m model) gitAddAll() tea.Cmd {
 	return func() tea.Msg {
-		// Check current status
-		statusCmd := exec.Command("git", "status", "--porcelain")
-		statusCmd.Dir = m.repoPath
-		statusOutput, err := statusCmd.Output()
-		if err != nil {
-			return statusMsg{message: fmt.Sprintf("❌ Failed to check git status: %v", err)}
-		}
-
-		statusText := strings.TrimSpace(string(statusOutput))
-		if statusText == "" {
-			return statusMsg{message: "ℹ️ No changes to stage"}
-		}
-
-		// Count unstaged files using shared logic
-		_, unstagedCount, _ := parseGitStatusOutput(statusText)
-		if unstagedCount == 0 {
-			return statusMsg{message: "ℹ️ No unstaged changes to add"}
-		}
-
 		output, err := executeGitCommand(m.repoPath, "add", ".")
 		if err != nil {
 			return statusMsg{message: fmt.Sprintf("❌ Git add failed: %v - %s", err, string(output))}
 		}
 
-		return statusMsg{message: fmt.Sprintf("✅ Added %d file(s) to staging", unstagedCount)}
+		return statusMsg{message: "✅ Added all file(s) to staging"}
 	}
 }
 
