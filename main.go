@@ -960,13 +960,6 @@ func (m model) gitReset() tea.Cmd {
 
 func (m model) gitAmend() tea.Cmd {
 	return func() tea.Msg {
-		// Check if there are any commits
-		logCmd := exec.Command("git", "log", "--oneline", "-1")
-		logCmd.Dir = m.repoPath
-		_, err := logCmd.Output()
-		if err != nil {
-			return statusMsg{message: "❌ No commits found to amend"}
-		}
 
 		// Get the current commit message
 		msgCmd := exec.Command("git", "log", "-1", "--pretty=%B")
