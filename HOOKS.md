@@ -1,4 +1,4 @@
-# Git Commit Hooks in Commit Helper
+# Git Commit Hooks in Git Helper
 
 ## What are Git Hooks?
 
@@ -6,7 +6,7 @@ Git hooks are scripts that Git automatically runs at certain points in the Git w
 
 ## Commit Message Hook
 
-The commit-helper tool can install a `commit-msg` hook that:
+The git-helper tool can install a `commit-msg` hook that:
 
 1. **Validates commit messages** against conventional commit format
 2. **Runs automatically** every time you try to commit
@@ -19,15 +19,15 @@ The hook is installed at: `your-repo/.git/hooks/commit-msg`
 ## How to Use
 
 ### Install the Hook
-- Press `h` in the commit-helper tool
+- Press `h` in the git-helper tool
 - Or manually copy the script to `.git/hooks/commit-msg` and make it executable
 
 ### Remove the Hook
-- Press `H` (Shift+h) in the commit-helper tool
+- Press `H` (Shift+h) in the git-helper tool
 - Or manually delete the file `.git/hooks/commit-msg`
 
 ### Check Hook Status
-- Press `i` in the commit-helper tool
+- Press `i` in the git-helper tool
 - The repository header shows 🔒 when a hook is active
 
 ## Conventional Commit Format
@@ -73,7 +73,7 @@ type(scope): description
 ## Removing/Disabling
 
 The hook can be easily removed:
-1. Use the commit-helper tool (`H` key)
+1. Use the git-helper tool (`H` key)
 2. Delete the file manually: `rm .git/hooks/commit-msg`
 3. Rename the file to disable temporarily: `mv .git/hooks/commit-msg .git/hooks/commit-msg.disabled`
 

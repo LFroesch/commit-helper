@@ -61,7 +61,7 @@ The interface maintains a clean, modern look with:
 ## 🚦 Workflow
 
 1. Make your code changes
-2. Run `./commit-helper`
+2. Run `./git-helper`
 3. Review files in mode 1
 4. Check suggestions in mode 2, or write custom in mode 3
 5. Commit with `Enter`
@@ -75,12 +75,12 @@ Simple as that! No complex navigation or confusing options.
 
 1. Build the application:
    ```bash
-   go build -o commit-helper .
+   go build -o git-helper .
    ```
 
 2. Install to your local bin directory:
    ```bash
-   cp commit-helper ~/.local/bin/
+   cp git-helper ~/.local/bin/
    ```
 
 3. Make sure `~/.local/bin` is in your PATH (add to your shell config if needed):
@@ -88,10 +88,10 @@ Simple as that! No complex navigation or confusing options.
    export PATH="$HOME/.local/bin:$PATH"
    ```
 
-4. Now you can use `commit-helper` from any git repository!
+4. Now you can use `git-helper` from any git repository!
 
 ### Usage
 Simply run from any git repository:
 ```bash
-commit-helper
+git-helper
 ```
