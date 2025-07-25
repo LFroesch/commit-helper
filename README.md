@@ -33,7 +33,7 @@ A simple, user-friendly terminal UI for creating git commits with smart suggesti
 
 3. **✏️ Custom Mode** (`3` key)
    - Write your own commit message
-   - Full control over the commit text
+   - Full control over the commit text, within conventional standards.
    - Press `Enter` to commit
 
 ### Quick Actions:
@@ -42,7 +42,6 @@ A simple, user-friendly terminal UI for creating git commits with smart suggesti
 - `s` - Git status check
 - `r` - Refresh/reload changes
 - `q` - Quit
-test
 
 ### Navigation:
 - `1`, `2`, `3` - Switch between modes
