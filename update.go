@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/LFroesch/gitty/internal/git"
+	"github.com/LFroesch/gitty/internal/github"
 )
 
 func (m model) Init() tea.Cmd {
@@ -149,12 +150,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.blameOffset = 0
 		return m, nil
 
+	case workflowRunsMsg:
+		m.workflowRuns = msg
+		if m.ghCursor >= len(m.workflowRuns) {
+			m.ghCursor = max(0, len(m.workflowRuns)-1)
+		}
+		return m, nil
+
+	case ghStatusMsg:
+		m.ghInstalled = msg.installed
+		m.ghAuthed = msg.authed
+		if msg.runs != nil {
+			m.workflowRuns = msg.runs
+			if m.ghCursor >= len(m.workflowRuns) {
+				m.ghCursor = max(0, len(m.workflowRuns)-1)
+			}
+		}
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Failed to load workflows: %v", msg.err)
+			m.statusExpiry = time.Now().Add(3 * time.Second)
+		}
+		return m, nil
+
+	case ghLogsMsg:
+		m.ghLogs = string(msg)
+		m.scrollOffset = 0
+		return m, nil
+
 	case cloneResultMsg:
 		if msg.err != nil {
 			return m, func() tea.Msg { return statusMsg{message: "Clone failed: " + msg.output} }
 		}
 		// Switch to the cloned repo
 		return m, func() tea.Msg { return repoSwitchMsg(msg.newPath) }
+
+	case mergeResultMsg:
+		m.mergeBranch = ""
+		m.mergeMode = 0
+		if msg.err != nil {
+			// Check if it's a conflict
+			if strings.Contains(msg.output, "CONFLICT") || strings.Contains(msg.output, "Automatic merge failed") {
+				m.mergeInProgress = true
+				return m, tea.Batch(
+					m.loadGitChanges(),
+					m.loadGitStatus(),
+					func() tea.Msg {
+						return statusMsg{message: "Merge conflict! Resolve conflicts, then use 'c' to continue or 'A' to abort"}
+					},
+				)
+			}
+			return m, func() tea.Msg { return statusMsg{message: "Merge failed: " + msg.output} }
+		}
+		m.mergeInProgress = false
+		return m, tea.Batch(
+			m.loadGitChanges(),
+			m.loadGitStatus(),
+			m.loadBranches(),
+			func() tea.Msg { return statusMsg{message: "Merge successful"} },
+		)
 
 	case cleanFilesMsg:
 		m.cleanFiles = msg
@@ -208,11 +261,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cloneInput, cmd = m.cloneInput.Update(msg)
 		cmds = append(cmds, cmd)
 	}
-	if m.initInput.Focused() {
-		var cmd tea.Cmd
-		m.initInput, cmd = m.initInput.Update(msg)
-		cmds = append(cmds, cmd)
-	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -228,17 +276,35 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.tab = "workspace"
 		m.viewMode = "files"
 		m.commitSummary = nil
+		m.statusMessage = ""
+		m.confirmAction = ""
 		return m, tea.Batch(m.loadGitChanges(), m.loadGitStatus())
 	case "2":
 		m.tab = "commit"
 		m.commitInput.Focus()
+		m.statusMessage = ""
+		m.confirmAction = ""
 		return m, tea.Batch(m.loadGitStatus(), m.generateCommitSuggestions())
 	case "3":
 		m.tab = "branches"
+		m.statusMessage = ""
+		m.confirmAction = ""
+		m.mergeBranch = ""
 		return m, m.loadBranches()
 	case "4":
 		m.tab = "tools"
 		m.toolMode = "menu"
+		m.statusMessage = ""
+		m.confirmAction = ""
+		return m, nil
+	case "5":
+		m.tab = "github"
+		m.ghInstalled = true
+		m.ghAuthed = true
+		runs, _ := github.GetWorkflowRuns(m.repoPath, 20)
+		m.workflowRuns = runs
+		m.statusMessage = ""
+		m.confirmAction = ""
 		return m, nil
 	}
 
@@ -252,6 +318,8 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleBranchesKey(key, msg)
 	case "tools":
 		return m.handleToolsKey(key, msg)
+	case "github":
+		return m.handleGitHubKey(key)
 	}
 
 	return m, nil
@@ -500,6 +568,39 @@ func (m model) handleBranchesKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 
+	// If merge mode selection (picking merge type)
+	if m.mergeBranch != "" {
+		switch key {
+		case "1":
+			return m, m.mergeBranchCmd(m.mergeBranch, 0) // normal
+		case "2":
+			return m, m.mergeBranchCmd(m.mergeBranch, 1) // no-ff
+		case "3":
+			return m, m.mergeBranchCmd(m.mergeBranch, 2) // squash
+		case "4":
+			return m, m.mergeBranchCmd(m.mergeBranch, 3) // ff-only
+		case "esc":
+			m.mergeBranch = ""
+			m.statusMessage = ""
+			return m, nil
+		}
+		return m, nil
+	}
+
+	// If merge in progress (conflict state)
+	if m.mergeInProgress {
+		switch key {
+		case "c":
+			// Continue merge after resolving conflicts
+			m.mergeInProgress = false
+			return m, m.mergeContinueCmd()
+		case "A":
+			// Abort merge (capital A to avoid accident)
+			m.mergeInProgress = false
+			return m, m.mergeAbortCmd()
+		}
+	}
+
 	// If creating new branch
 	if m.branchInput.Focused() {
 		switch key {
@@ -545,6 +646,19 @@ func (m model) handleBranchesKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd
 	case "n":
 		m.branchInput.Focus()
 		return m, textinput.Blink
+
+	case "m":
+		// Merge selected branch into current
+		if m.branchCursor < len(m.branches) {
+			branch := m.branches[m.branchCursor]
+			if branch.IsCurrent {
+				return m, func() tea.Msg { return statusMsg{message: "Can't merge current branch into itself"} }
+			}
+			m.mergeBranch = branch.Name
+			m.statusMessage = fmt.Sprintf("Merge '%s': [1] normal  [2] no-ff  [3] squash  [4] ff-only  [esc] cancel", branch.Name)
+			return m, nil
+		}
+		return m, nil
 
 	case "d":
 		if m.branchCursor < len(m.branches) {
@@ -626,8 +740,6 @@ func (m model) handleToolsKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleLogKey(key, msg)
 	case "clone":
 		return m.handleCloneKey(key, msg)
-	case "init":
-		return m.handleInitKey(key, msg)
 	case "clean":
 		return m.handleCleanKey(key)
 	}
@@ -636,8 +748,8 @@ func (m model) handleToolsKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleToolsMenuKey(key string) (tea.Model, tea.Cmd) {
-	// Main tools menu (categories)
-	maxCursor := 11 // 12 items: 0-11
+	// Main tools menu (categories) - 11 items
+	maxCursor := 10
 
 	switch key {
 	case "j", "down":
@@ -701,10 +813,6 @@ func (m model) handleToolsMenuKey(key string) (tea.Model, tea.Cmd) {
 		m.toolMode = "clone"
 		m.cloneInput.Focus()
 		return m, textinput.Blink
-	case "i":
-		m.toolMode = "init"
-		m.initInput.Focus()
-		return m, textinput.Blink
 	case "x":
 		m.toolMode = "clean"
 		return m, m.loadCleanFiles()
@@ -713,27 +821,9 @@ func (m model) handleToolsMenuKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) selectToolMenuItem() (tea.Model, tea.Cmd) {
+	// New order: Push, Fetch/Pull, Stash, Log, Rebase, Undo, Tags, History, Clean, Hooks, Clone, Init
 	switch m.toolCursor {
-	case 0: // Log
-		m.toolMode = "log"
-		return m, m.loadLogCommits("")
-	case 1: // Stash
-		m.toolMode = "stash"
-		return m, m.loadStashList()
-	case 2: // Tags
-		m.toolMode = "tags"
-		return m, m.loadTags()
-	case 3: // History
-		m.toolMode = "history"
-		return m, m.loadCommitHistory()
-	case 4: // Undo
-		m.toolMode = "undo"
-		return m, m.loadCommitHistory()
-	case 5: // Rebase
-		m.toolMode = "rebase"
-		m.rebaseInput.Focus()
-		return m, textinput.Blink
-	case 6: // Push
+	case 0: // Push
 		if m.confirmAction == "" {
 			m.confirmAction = "push"
 			m.statusMessage = "Press enter again to push to remote"
@@ -743,22 +833,36 @@ func (m model) selectToolMenuItem() (tea.Model, tea.Cmd) {
 			return m, m.pushChanges()
 		}
 		return m, nil
-	case 7: // Fetch/Pull
-		// Fetch is safe, no confirm needed
+	case 1: // Fetch/Pull
 		return m, m.fetchChanges()
-	case 8: // Hooks
-		m.toolMode = "hooks"
-		return m, nil
-	case 9: // Clean
+	case 2: // Stash
+		m.toolMode = "stash"
+		return m, m.loadStashList()
+	case 3: // Log
+		m.toolMode = "log"
+		return m, m.loadLogCommits("")
+	case 4: // Rebase
+		m.toolMode = "rebase"
+		m.rebaseInput.Focus()
+		return m, textinput.Blink
+	case 5: // Undo
+		m.toolMode = "undo"
+		return m, m.loadCommitHistory()
+	case 6: // Tags
+		m.toolMode = "tags"
+		return m, m.loadTags()
+	case 7: // History
+		m.toolMode = "history"
+		return m, m.loadCommitHistory()
+	case 8: // Clean
 		m.toolMode = "clean"
 		return m, m.loadCleanFiles()
+	case 9: // Hooks
+		m.toolMode = "hooks"
+		return m, nil
 	case 10: // Clone
 		m.toolMode = "clone"
 		m.cloneInput.Focus()
-		return m, textinput.Blink
-	case 11: // Init
-		m.toolMode = "init"
-		m.initInput.Focus()
 		return m, textinput.Blink
 	}
 	return m, nil
@@ -1165,6 +1269,72 @@ func (m model) handleCleanKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleGitHubKey(key string) (tea.Model, tea.Cmd) {
+	// If viewing logs, handle log-specific keys
+	if m.ghLogs != "" {
+		switch key {
+		case "esc":
+			m.ghLogs = ""
+			m.scrollOffset = 0
+			return m, nil
+		case "j", "down":
+			m.scrollOffset++
+			return m, nil
+		case "k", "up":
+			if m.scrollOffset > 0 {
+				m.scrollOffset--
+			}
+			return m, nil
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "j", "down":
+		if m.ghCursor < len(m.workflowRuns)-1 {
+			m.ghCursor++
+			m.adjustGHScroll()
+		}
+		return m, nil
+	case "k", "up":
+		if m.ghCursor > 0 {
+			m.ghCursor--
+			m.adjustGHScroll()
+		}
+		return m, nil
+	case "r":
+		// Refresh workflow runs synchronously
+		runs, _ := github.GetWorkflowRuns(m.repoPath, 20)
+		m.workflowRuns = runs
+		return m, nil
+	case "R":
+		// Rerun workflow synchronously
+		if m.ghCursor < len(m.workflowRuns) {
+			github.RerunWorkflow(m.repoPath, m.workflowRuns[m.ghCursor].ID)
+			runs, _ := github.GetWorkflowRuns(m.repoPath, 20)
+			m.workflowRuns = runs
+		}
+		return m, nil
+	case "enter":
+		// View logs synchronously
+		if m.ghCursor < len(m.workflowRuns) {
+			logs, err := github.GetRunLogs(m.repoPath, m.workflowRuns[m.ghCursor].ID)
+			if err != nil {
+				m.statusMessage = fmt.Sprintf("Failed to get logs: %v", err)
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+			} else if logs == "" {
+				m.statusMessage = "No logs available for this run"
+				m.statusExpiry = time.Now().Add(3 * time.Second)
+			} else {
+				m.ghLogs = logs
+				m.scrollOffset = 0
+			}
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m model) handleCloneKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.cloneInput.Focused() {
 		switch key {
@@ -1185,31 +1355,6 @@ func (m model) handleCloneKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.cloneInput, cmd = m.cloneInput.Update(msg)
-		return m, cmd
-	}
-	return m, nil
-}
-
-func (m model) handleInitKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.initInput.Focused() {
-		switch key {
-		case "enter":
-			path := strings.TrimSpace(m.initInput.Value())
-			if path != "" {
-				m.initInput.SetValue("")
-				m.initInput.Blur()
-				m.toolMode = "menu"
-				return m, m.initRepo(path)
-			}
-			return m, nil
-		case "esc":
-			m.initInput.SetValue("")
-			m.initInput.Blur()
-			m.toolMode = "menu"
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.initInput, cmd = m.initInput.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -1316,7 +1461,7 @@ func (m *model) adjustLogScroll() {
 }
 
 func (m *model) adjustBlameScroll() {
-	visibleItems := m.height - uiOverhead - 4
+	visibleItems := m.height - uiOverhead - 8
 	if visibleItems < 1 {
 		visibleItems = 1
 	}
@@ -1326,5 +1471,19 @@ func (m *model) adjustBlameScroll() {
 	}
 	if m.blameCursor >= m.blameOffset+visibleItems {
 		m.blameOffset = m.blameCursor - visibleItems + 1
+	}
+}
+
+func (m *model) adjustGHScroll() {
+	visibleItems := m.height - uiOverhead - 4
+	if visibleItems < 1 {
+		visibleItems = 1
+	}
+
+	if m.ghCursor < m.ghOffset {
+		m.ghOffset = m.ghCursor
+	}
+	if m.ghCursor >= m.ghOffset+visibleItems {
+		m.ghOffset = m.ghCursor - visibleItems + 1
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/LFroesch/gitty/internal/git"
+	"github.com/LFroesch/gitty/internal/github"
 )
 
 // Data loading commands
@@ -797,31 +798,100 @@ func (m model) cloneRepo(url string) tea.Cmd {
 	}
 }
 
-func (m model) initRepo(path string) tea.Cmd {
+// Merge operations
+
+func (m model) mergeBranchCmd(branch string, mode int) tea.Cmd {
 	return func() tea.Msg {
-		// Use current directory if path is empty
-		targetPath := path
-		if targetPath == "" {
-			targetPath = "."
+		var mergeMode git.MergeMode
+		switch mode {
+		case 1:
+			mergeMode = git.MergeModeNoFF
+		case 2:
+			mergeMode = git.MergeModeSquash
+		case 3:
+			mergeMode = git.MergeModeFastFwd
+		default:
+			mergeMode = git.MergeModeNormal
 		}
 
-		// Make absolute
-		absPath, err := filepath.Abs(targetPath)
+		output, err := git.Merge(m.repoPath, branch, mergeMode)
+		return mergeResultMsg{output: output, err: err}
+	}
+}
+
+func (m model) mergeAbortCmd() tea.Cmd {
+	return func() tea.Msg {
+		err := git.MergeAbort(m.repoPath)
 		if err != nil {
-			return statusMsg{message: fmt.Sprintf("Invalid path: %v", err)}
+			return statusMsg{message: fmt.Sprintf("Abort failed: %v", err)}
 		}
 
-		// Create directory if it doesn't exist
-		if err := os.MkdirAll(absPath, 0755); err != nil {
-			return statusMsg{message: fmt.Sprintf("Failed to create directory: %v", err)}
+		return tea.Batch(
+			m.loadGitChanges(),
+			m.loadGitStatus(),
+			func() tea.Msg {
+				return statusMsg{message: "Merge aborted"}
+			},
+		)()
+	}
+}
+
+func (m model) mergeContinueCmd() tea.Cmd {
+	return func() tea.Msg {
+		err := git.MergeContinue(m.repoPath)
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("Continue failed: %v", err)}
 		}
 
-		// Initialize git repo
-		if err := git.Init(absPath); err != nil {
-			return statusMsg{message: fmt.Sprintf("Init failed: %v", err)}
+		return tea.Batch(
+			m.loadGitChanges(),
+			m.loadGitStatus(),
+			func() tea.Msg {
+				return statusMsg{message: "Merge completed"}
+			},
+		)()
+	}
+}
+
+// GitHub operations
+
+func (m model) loadGitHubStatus() tea.Cmd {
+	repoPath := m.repoPath
+	return func() tea.Msg {
+		// Skip install check - go straight to auth and runs
+		authed := github.IsGHAuthed()
+		if !authed {
+			return ghStatusMsg{installed: true, authed: false}
+		}
+		runs, err := github.GetWorkflowRuns(repoPath, 20)
+		return ghStatusMsg{
+			installed: true,
+			authed:    true,
+			runs:      runs,
+			err:       err,
+		}
+	}
+}
+
+func (m model) rerunWorkflow(runID int64) tea.Cmd {
+	repoPath := m.repoPath
+	return func() tea.Msg {
+		err := github.RerunWorkflow(repoPath, runID)
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("Rerun failed: %v", err)}
+		}
+		return statusMsg{message: "Workflow rerun triggered"}
+	}
+}
+
+func (m model) viewWorkflowLogs(runID int64) tea.Cmd {
+	repoPath := m.repoPath
+	return func() tea.Msg {
+		logs, err := github.GetRunLogs(repoPath, runID)
+		if err != nil {
+			return statusMsg{message: fmt.Sprintf("Failed to get logs: %v", err)}
 		}
 
-		// Switch to the new repo
-		return repoSwitchMsg(absPath)
+		return ghLogsMsg(logs)
 	}
 }

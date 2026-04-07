@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -77,8 +78,9 @@ func (m model) renderTabs() string {
 	tab2 := m.renderTab("2", "Commit", m.tab == "commit")
 	tab3 := m.renderTab("3", "Branches", m.tab == "branches")
 	tab4 := m.renderTab("4", "Tools", m.tab == "tools")
+	tab5 := m.renderTab("5", "GitHub", m.tab == "github")
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, tab1, tab2, tab3, tab4)
+	return lipgloss.JoinHorizontal(lipgloss.Top, tab1, tab2, tab3, tab4, tab5)
 }
 
 func (m model) renderTab(key, label string, active bool) string {
@@ -109,6 +111,8 @@ func (m model) renderMainPanel() string {
 		_, content = m.renderBranchesContent(panelWidth-4, contentHeight)
 	case "tools":
 		_, content = m.renderToolsContent(panelWidth-4, contentHeight)
+	case "github":
+		_, content = m.renderGitHubContent(panelWidth-4, contentHeight)
 	}
 
 	panelContent := listStyle.Render(content)
@@ -142,8 +146,15 @@ func (m model) renderStatusBar() string {
 				k("tab") + d(": custom") + sep + k("esc") + d(": clear")
 		}
 	case "branches":
-		helpText = k("j/k") + d(": nav") + sep + k("enter") + d(": checkout") + sep +
-			k("n") + d(": new") + sep + k("d") + d(": delete") + sep + k("c") + d(": compare")
+		if m.mergeInProgress {
+			helpText = k("c") + d(": continue merge") + sep + k("A") + d(": abort merge")
+		} else if m.mergeBranch != "" {
+			helpText = k("1") + d(": normal") + sep + k("2") + d(": no-ff") + sep +
+				k("3") + d(": squash") + sep + k("4") + d(": ff-only") + sep + k("esc") + d(": cancel")
+		} else {
+			helpText = k("j/k") + d(": nav") + sep + k("enter") + d(": checkout") + sep +
+				k("m") + d(": merge") + sep + k("n") + d(": new") + sep + k("d") + d(": delete") + sep + k("c") + d(": compare")
+		}
 	case "tools":
 		switch m.toolMode {
 		case "stash":
@@ -157,6 +168,13 @@ func (m model) renderStatusBar() string {
 				k("c") + d(": check") + sep + k("esc") + d(": back")
 		default:
 			helpText = k("j/k") + d(": nav") + sep + k("enter") + d(": select") + sep + k("esc") + d(": back")
+		}
+	case "github":
+		if m.ghLogs != "" {
+			helpText = k("j/k") + d(": scroll") + sep + k("esc") + d(": back")
+		} else {
+			helpText = k("j/k") + d(": nav") + sep + k("r") + d(": refresh") + sep +
+				k("enter") + d(": view logs") + sep + k("R") + d(": rerun")
 		}
 	}
 
@@ -256,7 +274,7 @@ func (m model) renderDiffPane(width, height int) string {
 	var content string
 
 	if m.diffContent == "" {
-		headerText = "👁 Preview"
+		headerText = "🔎 Preview"
 		content = helpStyle.Render("Select a file to preview changes")
 	} else {
 		lines := strings.Split(m.diffContent, "\n")
@@ -281,7 +299,7 @@ func (m model) renderDiffPane(width, height int) string {
 		if len(lines) > maxLines {
 			scrollInfo = helpStyle.Render(fmt.Sprintf("[%d/%d]", m.scrollOffset+1, len(lines)))
 		}
-		headerText = ("👁 Preview ") + scrollInfo
+		headerText = ("🔎 Preview ") + scrollInfo
 
 		// Apply scroll
 		startIdx := m.scrollOffset
@@ -483,7 +501,7 @@ func (m model) renderCommitContent(width, height int) (string, string) {
 
 	// Recent commits
 	if len(m.recentCommits) > 0 {
-		sections = append(sections, helpStyle.Render("Recent:"))
+		sections = append(sections, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).Render("Recent:"))
 		for _, commit := range m.recentCommits {
 			sections = append(sections, fmt.Sprintf("  %s %s",
 				lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(commit.Hash),
@@ -585,28 +603,64 @@ func (m model) renderBranchesContent(width, height int) (string, string) {
 }
 
 func (m model) renderBranchList(width, height int) string {
-	// Count local vs remote
-	localCount := 0
-	remoteCount := 0
-	for _, b := range m.branches {
+	// Separate local and remote branches
+	var localBranches, remoteBranches []int
+	for i, b := range m.branches {
 		if b.IsRemote {
-			remoteCount++
+			remoteBranches = append(remoteBranches, i)
 		} else {
-			localCount++
+			localBranches = append(localBranches, i)
 		}
 	}
 
-	header := sectionHeaderStyle.Render("Branches") + " " +
-		branchCurrentStyle.Render(fmt.Sprintf("🏠%d", localCount)) + " " +
-		branchRemoteStyle.Render(fmt.Sprintf("☁️%d", remoteCount))
+	// Build flat list with section markers
+	type listItem struct {
+		isHeader    bool
+		headerText  string
+		branchIndex int
+	}
+	var items []listItem
+
+	if len(localBranches) > 0 {
+		items = append(items, listItem{isHeader: true, headerText: "Local"})
+		for _, idx := range localBranches {
+			items = append(items, listItem{branchIndex: idx})
+		}
+	}
+	if len(remoteBranches) > 0 {
+		if len(localBranches) > 0 {
+			items = append(items, listItem{isHeader: true, headerText: ""}) // spacer
+		}
+		items = append(items, listItem{isHeader: true, headerText: "Remote"})
+		for _, idx := range remoteBranches {
+			items = append(items, listItem{branchIndex: idx})
+		}
+	}
+
+	var lines []string
 
 	maxItems := height - 4
 	if maxItems < 1 {
 		maxItems = 1
 	}
 
-	hasTop := m.branchOffset > 0
-	hasBottom := m.branchOffset+maxItems < len(m.branches)
+	// Find visual index of cursor
+	visualCursor := 0
+	for i, item := range items {
+		if !item.isHeader && item.branchIndex == m.branchCursor {
+			visualCursor = i
+			break
+		}
+	}
+
+	// Calculate scroll offset based on visual cursor
+	offset := 0
+	if visualCursor >= maxItems {
+		offset = visualCursor - maxItems + 1
+	}
+
+	hasTop := offset > 0
+	hasBottom := offset+maxItems < len(items)
 
 	if hasTop {
 		maxItems--
@@ -615,59 +669,87 @@ func (m model) renderBranchList(width, height int) string {
 		maxItems--
 	}
 
-	var lines []string
-	lines = append(lines, header)
-	lines = append(lines, helpStyle.Render(strings.Repeat("─", width-6)))
-
 	if hasTop {
-		lines = append(lines, scrollIndicatorStyle.Render("  ▲ more above"))
+		lines = append(lines, scrollIndicatorStyle.Render("  ▲ more"))
 	}
 
-	endIdx := m.branchOffset + maxItems
-	if endIdx > len(m.branches) {
-		endIdx = len(m.branches)
+	endIdx := offset + maxItems
+	if endIdx > len(items) {
+		endIdx = len(items)
 	}
 
-	for i := m.branchOffset; i < endIdx; i++ {
-		branch := m.branches[i]
+	selBg := lipgloss.Color("236")
 
-		// Icon based on branch type
+	for i := offset; i < endIdx; i++ {
+		item := items[i]
+
+		if item.isHeader {
+			if item.headerText == "" {
+				lines = append(lines, "")
+			} else {
+				lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("105")).Render("  "+item.headerText))
+			}
+			continue
+		}
+
+		branch := m.branches[item.branchIndex]
+		isSelected := item.branchIndex == m.branchCursor
+
+		// Icon: * for current, ○ for local, ↗ for remote
 		var icon string
-		var nameStyle lipgloss.Style
+		var iconColor lipgloss.Color
 		if branch.IsCurrent {
-			icon = branchCurrentStyle.Render("🏠")
-			nameStyle = branchCurrentStyle
+			icon = "*"
+			iconColor = lipgloss.Color("82")
 		} else if branch.IsRemote {
-			icon = branchRemoteStyle.Render("☁️")
-			nameStyle = branchRemoteStyle
+			icon = "↗"
+			iconColor = lipgloss.Color("75")
 		} else {
-			icon = helpStyle.Render("🌿")
-			nameStyle = normalStyle
+			icon = "○"
+			iconColor = lipgloss.Color("245")
 		}
 
-		// Tracking info with colored ahead/behind
-		tracking := ""
-		if branch.Upstream != "" {
-			tracking = helpStyle.Render(" → " + branch.Upstream)
-			if branch.Ahead > 0 {
-				tracking += " " + branchAheadStyle.Render(fmt.Sprintf("↑%d", branch.Ahead))
+		// Ahead/behind indicators only (no upstream name)
+		var aheadBehind string
+		if branch.Ahead > 0 {
+			if isSelected {
+				aheadBehind += " " + lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Background(selBg).Render(fmt.Sprintf("↑%d", branch.Ahead))
+			} else {
+				aheadBehind += " " + branchAheadStyle.Render(fmt.Sprintf("↑%d", branch.Ahead))
 			}
-			if branch.Behind > 0 {
-				tracking += " " + branchBehindStyle.Render(fmt.Sprintf("↓%d", branch.Behind))
+		}
+		if branch.Behind > 0 {
+			if isSelected {
+				aheadBehind += " " + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Background(selBg).Render(fmt.Sprintf("↓%d", branch.Behind))
+			} else {
+				aheadBehind += " " + branchBehindStyle.Render(fmt.Sprintf("↓%d", branch.Behind))
 			}
 		}
 
-		line := fmt.Sprintf(" %s %s%s", icon, nameStyle.Render(branch.Name), tracking)
-
-		if i == m.branchCursor {
-			lines = append(lines, selectedStyle.Width(width-4).Render(line))
+		if isSelected {
+			sp := lipgloss.NewStyle().Background(selBg).Render(" ")
+			indent := lipgloss.NewStyle().Background(selBg).Render("  ")
+			iconStyled := lipgloss.NewStyle().Foreground(iconColor).Background(selBg).Render(icon)
+			nameStyled := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(selBg).Bold(true).Render(branch.Name)
+			line := indent + iconStyled + sp + nameStyled + aheadBehind
+			lines = append(lines, lipgloss.NewStyle().Width(width-4).Background(selBg).Render(line))
 		} else {
+			iconStyled := lipgloss.NewStyle().Foreground(iconColor).Render(icon)
+			var nameStyled string
+			if branch.IsCurrent {
+				nameStyled = branchCurrentStyle.Render(branch.Name)
+			} else if branch.IsRemote {
+				nameStyled = branchRemoteStyle.Render(branch.Name)
+			} else {
+				nameStyled = normalStyle.Render(branch.Name)
+			}
+			line := "  " + iconStyled + " " + nameStyled + aheadBehind
 			lines = append(lines, line)
 		}
 	}
 
 	if hasBottom {
-		lines = append(lines, scrollIndicatorStyle.Render("  ▼ more below"))
+		lines = append(lines, scrollIndicatorStyle.Render("  ▼ more"))
 	}
 
 	return strings.Join(lines, "\n")
@@ -723,8 +805,6 @@ func (m model) renderToolsContent(width, height int) (string, string) {
 		return "", m.renderHooksContent(width, height)
 	case "clone":
 		return "", m.renderCloneContent(width, height)
-	case "init":
-		return "", m.renderInitContent(width, height)
 	case "clean":
 		return "", m.renderCleanContent(width, height)
 	default:
@@ -733,29 +813,35 @@ func (m model) renderToolsContent(width, height int) (string, string) {
 }
 
 func (m model) renderToolsMenu(width, height int) string {
-	tools := []struct {
+	type toolItem struct {
 		key  string
 		icon string
 		name string
 		desc string
-	}{
-		{"o", "📜", "Log", "Browse commit history"},
+	}
+
+	// Define tools in priority order (most-used first)
+	allTools := []toolItem{
+		{"p", " ↑", "Push", "Push to remote"},
+		{"f", " ↓", "Fetch/Pull", "Sync with remote"},
 		{"s", "📦", "Stash", "Save/restore work in progress"},
-		{"t", "🏷️", "Tags", "Manage version tags"},
-		{"h", "📜", "History", "View reflog"},
-		{"u", "⏪", "Undo", "Undo recent commits"},
+		{"o", "📜", "Log", "Browse commit history"},
 		{"r", "📝", "Rebase", "Interactive rebase"},
-		{"p", "⬆️", "Push", "Push to remote"},
-		{"f", "⬇️", "Fetch/Pull", "Sync with remote"},
-		{"g", "🔒", "Hooks", "Git hooks management"},
+		{"u", "⏪", "Undo", "Undo recent commits"},
+		{"t", "🔖", "Tags", "Manage version tags"},
+		{"h", "📜", "History", "View reflog"},
 		{"x", "🧹", "Clean", "Remove untracked files"},
+		{"g", "🔒", "Hooks", "Git hooks management"},
 		{"c", "📥", "Clone", "Clone a repository"},
-		{"i", "🆕", "Init", "Initialize new repo"},
+	}
+
+	// Filter out Init if already in a git repo
+	var tools []toolItem
+	for _, t := range allTools {
+		tools = append(tools, t)
 	}
 
 	var lines []string
-	lines = append(lines, sectionHeaderStyle.Render("Git Tools"))
-	lines = append(lines, helpStyle.Render(strings.Repeat("─", width-6)))
 
 	for i, tool := range tools {
 		selBg := lipgloss.Color("236")
@@ -1061,7 +1147,7 @@ func (m model) renderTagsList(width, height int) string {
 
 	for i := m.tagOffset; i < endIdx; i++ {
 		tag := m.tags[i]
-		icon := "🏷️"
+		icon := "🔖"
 		if tag.IsAnnotated {
 			icon = "📝"
 		}
@@ -1377,7 +1463,25 @@ func (m model) renderBlame(width, height int) string {
 	header := sectionHeaderStyle.Render("Blame: " + m.blameFile)
 	help := k("j/k") + d(": nav") + " | " + k("esc") + d(": back")
 
-	maxItems := height - 4
+	// Show selected line's commit info
+	var selectedInfo string
+	if m.blameCursor < len(m.blameLines) {
+		bl := m.blameLines[m.blameCursor]
+		if strings.HasPrefix(bl.Hash, "0000000") {
+			selectedInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("uncommitted changes")
+		} else {
+			selectedInfo = fmt.Sprintf("%s by %s (%s)",
+				lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(bl.Hash),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(bl.Author),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(bl.Date))
+		}
+	}
+
+	// Column header
+	colHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+		" COMMIT   LINE  CODE")
+
+	maxItems := height - 8
 	if maxItems < 1 {
 		maxItems = 1
 	}
@@ -1394,10 +1498,12 @@ func (m model) renderBlame(width, height int) string {
 
 	var lines []string
 	lines = append(lines, header)
+	lines = append(lines, selectedInfo)
+	lines = append(lines, colHeader)
 	lines = append(lines, helpStyle.Render(strings.Repeat("─", width-6)))
 
 	if hasTop {
-		lines = append(lines, scrollIndicatorStyle.Render("  ▲ more above"))
+		lines = append(lines, scrollIndicatorStyle.Render(" ▲ more"))
 	}
 
 	endIdx := m.blameOffset + maxItems
@@ -1405,30 +1511,53 @@ func (m model) renderBlame(width, height int) string {
 		endIdx = len(m.blameLines)
 	}
 
+	// Styles
 	hashStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	authorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	dateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	lineNumStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	newStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	lineNumStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	codeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	// Track previous hash to collapse repeats
+	prevHash := ""
+	sep := sepStyle.Render("│")
 
 	for i := m.blameOffset; i < endIdx; i++ {
 		bl := m.blameLines[i]
-		// Truncate author name
-		author := bl.Author
-		if len(author) > 10 {
-			author = author[:10]
+
+		// Calculate available content width
+		contentWidth := width - 22
+		if contentWidth < 10 {
+			contentWidth = 10
 		}
 
-		line := fmt.Sprintf("%s %s %s %s %s",
-			hashStyle.Render(bl.Hash),
-			authorStyle.Render(fmt.Sprintf("%-10s", author)),
-			dateStyle.Render(bl.Date),
-			lineNumStyle.Render(fmt.Sprintf("%4d", bl.LineNum)),
-			bl.Content)
-
-		// Truncate if too long
-		if len(line) > width-4 {
-			line = line[:width-7] + "..."
+		// Truncate content cleanly
+		content := bl.Content
+		if len(content) > contentWidth {
+			content = content[:contentWidth-1] + "…"
 		}
+
+		lineNum := lineNumStyle.Render(fmt.Sprintf("%4d", bl.LineNum))
+		codeText := codeStyle.Render(content)
+
+		var line string
+
+		// Handle uncommitted lines (hash is all zeros)
+		if strings.HasPrefix(bl.Hash, "0000000") {
+			if prevHash == bl.Hash {
+				line = fmt.Sprintf(" %s  %s %s  %s", "      ", sep, lineNum, codeText)
+			} else {
+				line = fmt.Sprintf(" %s  %s %s  %s", newStyle.Render("   new"), sep, lineNum, codeText)
+			}
+		} else {
+			if bl.Hash == prevHash {
+				line = fmt.Sprintf(" %s  %s %s  %s", "      ", sep, lineNum, codeText)
+			} else {
+				line = fmt.Sprintf(" %s  %s %s  %s", hashStyle.Render(bl.Hash[:6]), sep, lineNum, codeText)
+			}
+		}
+
+		prevHash = bl.Hash
 
 		if i == m.blameCursor {
 			lines = append(lines, selectedStyle.Width(width-4).Render(line))
@@ -1438,7 +1567,7 @@ func (m model) renderBlame(width, height int) string {
 	}
 
 	if hasBottom {
-		lines = append(lines, scrollIndicatorStyle.Render("  ▼ more below"))
+		lines = append(lines, scrollIndicatorStyle.Render(" ▼ more"))
 	}
 
 	lines = append(lines, "")
@@ -1466,7 +1595,7 @@ func (m model) renderCleanContent(width, height int) string {
 	lines = append(lines, header)
 	lines = append(lines, helpStyle.Render(strings.Repeat("─", width-6)))
 	lines = append(lines, "")
-	lines = append(lines, warningStyle.Render(fmt.Sprintf("⚠️  %d untracked file(s) will be deleted:", len(m.cleanFiles))))
+	lines = append(lines, warningStyle.Render(fmt.Sprintf("⚠ %d untracked file(s) will be deleted:", len(m.cleanFiles))))
 	lines = append(lines, "")
 
 	for i, file := range m.cleanFiles {
@@ -1504,18 +1633,235 @@ func (m model) renderCloneContent(width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m model) renderInitContent(width, height int) string {
+// GitHub tab content
+
+func (m model) renderGitHubContent(width, height int) (string, string) {
+	if !m.ghInstalled {
+		return "", m.renderGitHubNotInstalled(width)
+	}
+	if !m.ghAuthed {
+		return "", m.renderGitHubNotAuthed(width)
+	}
+	if m.ghLogs != "" {
+		return "", m.renderWorkflowLogs(width, height)
+	}
+	return "", m.renderWorkflowRuns(width, height)
+}
+
+func (m model) renderGitHubNotInstalled(width int) string {
 	var lines []string
-	lines = append(lines, sectionHeaderStyle.Render("Initialize Repository"))
+	lines = append(lines, sectionHeaderStyle.Render("GitHub CLI Required"))
 	lines = append(lines, helpStyle.Render(strings.Repeat("─", width-6)))
 	lines = append(lines, "")
-	lines = append(lines, normalStyle.Render("Enter directory path:"))
+	lines = append(lines, errorStyle.Render("✗ GitHub CLI (gh) is not installed"))
 	lines = append(lines, "")
-	lines = append(lines, m.initInput.View())
+	lines = append(lines, normalStyle.Render("Install it to use GitHub features:"))
 	lines = append(lines, "")
-	lines = append(lines, helpStyle.Render("Leave empty for current directory, or enter a path"))
+	lines = append(lines, helpStyle.Render("  brew install gh        # macOS"))
+	lines = append(lines, helpStyle.Render("  apt install gh         # Debian/Ubuntu"))
+	lines = append(lines, helpStyle.Render("  winget install gh      # Windows"))
 	lines = append(lines, "")
-	lines = append(lines, helpStyle.Render("Press enter to init, esc to cancel"))
+	lines = append(lines, helpStyle.Render("Then run: gh auth login"))
 
 	return strings.Join(lines, "\n")
+}
+
+func (m model) renderGitHubNotAuthed(width int) string {
+	var lines []string
+	lines = append(lines, sectionHeaderStyle.Render("GitHub Authentication Required"))
+	lines = append(lines, helpStyle.Render(strings.Repeat("─", width-6)))
+	lines = append(lines, "")
+	lines = append(lines, warningStyle.Render("⚠ Not authenticated with GitHub"))
+	lines = append(lines, "")
+	lines = append(lines, normalStyle.Render("Run this command to authenticate:"))
+	lines = append(lines, "")
+	lines = append(lines, helpStyle.Render("  gh auth login"))
+	lines = append(lines, "")
+	lines = append(lines, helpStyle.Render("Press 'r' to refresh after authenticating"))
+
+	return strings.Join(lines, "\n")
+}
+
+func (m model) renderWorkflowRuns(width, height int) string {
+	header := sectionHeaderStyle.Render("CI/CD Workflow Runs")
+
+	if len(m.workflowRuns) == 0 {
+		return header + "\n" + helpStyle.Render(strings.Repeat("─", width-6)) + "\n\n" +
+			helpStyle.Render("No workflow runs found. Press 'r' to refresh.")
+	}
+
+	maxItems := height - 4
+	if maxItems < 1 {
+		maxItems = 1
+	}
+
+	hasTop := m.ghOffset > 0
+	hasBottom := m.ghOffset+maxItems < len(m.workflowRuns)
+
+	if hasTop {
+		maxItems--
+	}
+	if hasBottom {
+		maxItems--
+	}
+
+	var lines []string
+	lines = append(lines, header)
+	lines = append(lines, helpStyle.Render(strings.Repeat("─", width-6)))
+
+	if hasTop {
+		lines = append(lines, scrollIndicatorStyle.Render("  ▲ more above"))
+	}
+
+	endIdx := m.ghOffset + maxItems
+	if endIdx > len(m.workflowRuns) {
+		endIdx = len(m.workflowRuns)
+	}
+
+	for i := m.ghOffset; i < endIdx; i++ {
+		run := m.workflowRuns[i]
+
+		// Status icon
+		var icon string
+		var iconStyle lipgloss.Style
+		switch run.Status {
+		case "completed":
+			switch run.Conclusion {
+			case "success":
+				icon = "✓"
+				iconStyle = successStyle
+			case "failure":
+				icon = "✗"
+				iconStyle = errorStyle
+			case "cancelled":
+				icon = "○"
+				iconStyle = warningStyle
+			default:
+				icon = "?"
+				iconStyle = helpStyle
+			}
+		case "in_progress":
+			icon = "⏳"
+			iconStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+		case "queued":
+			icon = "◷"
+			iconStyle = helpStyle
+		default:
+			icon = "?"
+			iconStyle = helpStyle
+		}
+
+		// Time ago
+		timeAgo := formatTimeAgo(run.CreatedAt)
+
+		// Branch (truncate if too long)
+		branch := run.Branch
+		if len(branch) > 15 {
+			branch = branch[:12] + "..."
+		}
+
+		line := fmt.Sprintf(" %s %-20s %-15s %s",
+			iconStyle.Render(icon),
+			run.Name,
+			lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(branch),
+			helpStyle.Render(timeAgo))
+
+		if i == m.ghCursor {
+			lines = append(lines, selectedStyle.Width(width-4).Render(line))
+		} else {
+			lines = append(lines, line)
+		}
+	}
+
+	if hasBottom {
+		lines = append(lines, scrollIndicatorStyle.Render("  ▼ more below"))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m model) renderWorkflowLogs(width, height int) string {
+	k := func(key string) string { return keyBindStyle.Render(key) }
+	d := func(desc string) string { return keyDescStyle.Render(desc) }
+
+	header := sectionHeaderStyle.Render("Workflow Logs")
+	help := k("j/k") + d(": scroll") + " | " + k("esc") + d(": back")
+
+	lines := strings.Split(m.ghLogs, "\n")
+
+	maxLines := height - 4
+	if maxLines < 1 {
+		maxLines = 1
+	}
+
+	hasTop := m.scrollOffset > 0
+	hasBottom := m.scrollOffset+maxLines < len(lines)
+
+	if hasTop {
+		maxLines--
+	}
+	if hasBottom {
+		maxLines--
+	}
+
+	var result []string
+	result = append(result, header)
+	result = append(result, helpStyle.Render(strings.Repeat("─", width-6)))
+
+	if hasTop {
+		result = append(result, scrollIndicatorStyle.Render("  ▲ more above"))
+	}
+
+	endIdx := m.scrollOffset + maxLines
+	if endIdx > len(lines) {
+		endIdx = len(lines)
+	}
+
+	for i := m.scrollOffset; i < endIdx; i++ {
+		line := lines[i]
+		// Truncate long lines
+		maxLineWidth := width - 6
+		if len(line) > maxLineWidth {
+			line = line[:maxLineWidth-3] + "..."
+		}
+		result = append(result, line)
+	}
+
+	if hasBottom {
+		result = append(result, scrollIndicatorStyle.Render("  ▼ more below"))
+	}
+
+	result = append(result, "")
+	result = append(result, help)
+
+	return strings.Join(result, "\n")
+}
+
+func formatTimeAgo(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1m ago"
+		}
+		return fmt.Sprintf("%dm ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1h ago"
+		}
+		return fmt.Sprintf("%dh ago", h)
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1d ago"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	}
 }

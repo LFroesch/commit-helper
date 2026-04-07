@@ -904,6 +904,10 @@ type BlameLine struct {
 	Content string
 }
 
+func isHexChar(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
 func GetBlame(repoPath, filePath string) []BlameLine {
 	var lines []BlameLine
 
@@ -924,10 +928,10 @@ func GetBlame(repoPath, filePath string) []BlameLine {
 			continue
 		}
 
-		// Hash line: starts with 40-char hash
-		if len(line) >= 40 && !strings.HasPrefix(line, "\t") {
+		// Hash line: starts with 40-char hex hash (not keywords like "previous", "boundary")
+		if len(line) >= 40 && !strings.HasPrefix(line, "\t") && isHexChar(line[0]) {
 			parts := strings.Fields(line)
-			if len(parts) >= 1 {
+			if len(parts) >= 1 && len(parts[0]) >= 40 {
 				currentHash = parts[0][:7] // short hash
 			}
 		} else if strings.HasPrefix(line, "author ") {
@@ -951,4 +955,47 @@ func GetBlame(repoPath, filePath string) []BlameLine {
 	}
 
 	return lines
+}
+
+// Merge functions
+
+type MergeMode string
+
+const (
+	MergeModeNormal  MergeMode = "normal"
+	MergeModeNoFF    MergeMode = "no-ff"
+	MergeModeSquash  MergeMode = "squash"
+	MergeModeFastFwd MergeMode = "ff-only"
+)
+
+func Merge(repoPath, branch string, mode MergeMode) (string, error) {
+	var args []string
+	switch mode {
+	case MergeModeNoFF:
+		args = []string{"merge", "--no-ff", branch}
+	case MergeModeSquash:
+		args = []string{"merge", "--squash", branch}
+	case MergeModeFastFwd:
+		args = []string{"merge", "--ff-only", branch}
+	default:
+		args = []string{"merge", branch}
+	}
+	output, err := Execute(repoPath, args...)
+	return string(output), err
+}
+
+func MergeAbort(repoPath string) error {
+	_, err := Execute(repoPath, "merge", "--abort")
+	return err
+}
+
+func MergeContinue(repoPath string) error {
+	_, err := Execute(repoPath, "merge", "--continue")
+	return err
+}
+
+func IsMergeInProgress(repoPath string) bool {
+	mergeHead := filepath.Join(repoPath, ".git", "MERGE_HEAD")
+	_, err := os.Stat(mergeHead)
+	return err == nil
 }

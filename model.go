@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/LFroesch/gitty/internal/git"
+	"github.com/LFroesch/gitty/internal/github"
 )
 
 // Constants
@@ -52,10 +53,22 @@ type logCommitsMsg []git.Commit
 type logDetailMsg git.CommitDetail
 type logDiffMsg string
 type blameMsg []git.BlameLine
+type workflowRunsMsg []github.WorkflowRun
+type ghStatusMsg struct {
+	installed bool
+	authed    bool
+	runs      []github.WorkflowRun
+	err       error
+}
+type ghLogsMsg string
 type cloneResultMsg struct {
 	output  string
 	err     error
 	newPath string
+}
+type mergeResultMsg struct {
+	output string
+	err    error
 }
 type repoSwitchMsg string
 
@@ -132,6 +145,11 @@ type model struct {
 	cleanFiles  []string
 	cleanCursor int
 
+	// Merge
+	mergeMode       int    // 0=normal, 1=no-ff, 2=squash, 3=ff-only
+	mergeBranch     string // branch being merged
+	mergeInProgress bool
+
 	// Log viewer
 	logCommits     []git.Commit
 	logCursor      int
@@ -147,9 +165,16 @@ type model struct {
 	blameOffset int
 	blameFile   string
 
-	// Clone/Init
+	// GitHub
+	workflowRuns []github.WorkflowRun
+	ghCursor     int
+	ghOffset     int
+	ghInstalled  bool
+	ghAuthed     bool
+	ghLogs       string // workflow run logs when viewing
+
+	// Clone
 	cloneInput textinput.Model
-	initInput  textinput.Model
 
 	// System
 	repoPath         string
@@ -266,10 +291,12 @@ var (
 	// Icon styles
 	iconStagedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("82")).
+			Background(lipgloss.Color("236")).
 			Bold(true)
 
 	iconUnstagedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("214"))
+				Foreground(lipgloss.Color("214")).
+				Background(lipgloss.Color("236"))
 
 	iconUntrackedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("245"))
@@ -352,10 +379,6 @@ func initialModel() model {
 	cloneInput.Placeholder = "Repository URL (https://... or git@...)..."
 	cloneInput.CharLimit = 200
 
-	initInput := textinput.New()
-	initInput.Placeholder = "Directory path..."
-	initInput.CharLimit = 200
-
 	return model{
 		tab:                    "workspace",
 		toolMode:               "menu",
@@ -368,7 +391,6 @@ func initialModel() model {
 		tagInput:               tagInput,
 		logSearchInput:         logSearchInput,
 		cloneInput:             cloneInput,
-		initInput:              initInput,
 		showDiffPreview:        true,
 		selectedSuggestion:     0,
 		commitMsgHookInstalled: git.IsCommitMsgHookInstalled(repoPath),
