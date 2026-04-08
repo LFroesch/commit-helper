@@ -269,8 +269,15 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	// Global keys
+	if key == "ctrl+c" {
+		return m, tea.Quit
+	}
 	switch key {
-	case "ctrl+c", "q":
+	case "q":
+		if m.viewMode != "files" && m.viewMode != "" {
+			m.viewMode = "files"
+			return m, nil
+		}
 		return m, tea.Quit
 	case "1":
 		m.tab = "workspace"

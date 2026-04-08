@@ -15,6 +15,7 @@
 go.work
 
 # Built binaries (app-specific)
+gitty
 backup-xd
 dwight
 git-helper
