@@ -4,6 +4,8 @@ Full-featured TUI git client with smart commit suggestions. Stage files, commit 
 
 ## Quick Install
 
+Supported platforms: Linux and macOS. On Windows, use WSL.
+
 Recommended (installs to `~/.local/bin`):
 
 ```bash
