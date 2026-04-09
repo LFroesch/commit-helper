@@ -2,6 +2,33 @@
 
 Full-featured TUI git client with smart commit suggestions. Stage files, commit with AI-style suggestions, manage branches, rebase, stash, and monitor CI/CD — all from the terminal. Built with Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
+## Quick Install
+
+Recommended (installs to `~/.local/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LFroesch/gitty/main/install.sh | bash
+```
+
+Or download a binary from [GitHub Releases](https://github.com/LFroesch/gitty/releases).
+
+Or install with Go:
+
+```bash
+go install github.com/LFroesch/gitty@latest
+```
+
+Or build from source:
+
+```bash
+make install
+```
+
+Command:
+
+```bash
+gitty
+```
 ## Install
 
 ```bash
