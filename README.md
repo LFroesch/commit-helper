@@ -29,11 +29,6 @@ make install
 Command:
 
 ```bash
-gitty
-```
-## Usage
-
-```bash
 cd your-repo
 gitty
 ```
@@ -41,6 +36,7 @@ gitty
 ## Tabs
 
 ### 1. Workspace
+
 File staging with live diff preview.
 
 | Key | Action |
@@ -54,6 +50,7 @@ File staging with live diff preview.
 **Conflict mode** (auto-activates): `o` ours, `t` theirs, `b` both, `c` continue merge.
 
 ### 2. Commit
+
 Smart suggestions + custom input.
 
 | Key | Action |
@@ -65,6 +62,7 @@ Smart suggestions + custom input.
 Suggestions are generated from diff analysis — detects keywords, function names, variables, comments, and classifies changes as feat/fix/refactor/etc.
 
 ### 3. Branches
+
 Create, switch, delete, merge, compare.
 
 | Key | Action |
@@ -78,6 +76,7 @@ Create, switch, delete, merge, compare.
 | `p` | Prune stale remotes |
 
 ### 4. Tools
+
 Advanced operations submenu.
 
 | Tool | What it does |
@@ -90,6 +89,7 @@ Advanced operations submenu.
 Also: stash (list/push/pop/apply/drop), tags (list/create/delete/push), cherry-pick, revert, clean, git hooks.
 
 ### 5. GitHub
+
 CI/CD workflow status via `gh` CLI.
 
 | Key | Action |
