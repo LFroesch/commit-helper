@@ -31,18 +31,6 @@ Command:
 ```bash
 gitty
 ```
-## Install
-
-```bash
-go install github.com/LFroesch/gitty@latest
-```
-
-Or build from source:
-
-```bash
-make install
-```
-
 ## Usage
 
 ```bash
