@@ -10,7 +10,16 @@ import (
 	"github.com/LFroesch/gitty/internal/logger"
 )
 
+var version = "dev"
+
 func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-v" {
+			fmt.Println("gitty", version)
+			return
+		}
+	}
+
 	// Initialize logger
 	if err := logger.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not initialize logger: %v\n", err)

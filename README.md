@@ -31,6 +31,7 @@ Command:
 ```bash
 cd your-repo
 gitty
+gitty --version
 ```
 
 ## Tabs
@@ -97,6 +98,13 @@ CI/CD workflow status via `gh` CLI.
 | `enter` | View run logs |
 | `R` | Rerun workflow |
 | `r` | Refresh |
+
+## Optional Dependencies
+
+- `gh` enables the GitHub workflows tab
+- installed git hooks run through your local Git setup
+
+Without `gh`, the core workspace, commit, branch, and tool flows still work.
 
 ## Commit Suggestion Engine
 

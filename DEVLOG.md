@@ -1,4 +1,7 @@
 ## DevLog
+### 2026-05-12: Release standardization pass
+Embedded release version metadata in local builds and tag builds, documented `--version`, and added README notes around optional `gh` integration so the release surface matches the rest of the suite.
+
 ### 2026-03-23: Doc suite added
 Added CLAUDE.md, agent_spec.md. Updated README to scout standard (concise, tables, no emoji headers). Updated WORK.md with feature ideas.
 
